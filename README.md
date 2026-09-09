@@ -162,16 +162,6 @@ npm run build
 
 ---
 
-## 🔑 Seed User Credentials
-
-| Role | Email | Password | Allowed Permissions |
-| :--- | :--- | :--- | :--- |
-| **Ministry Admin** | `admin@inspect-ai.local` | `Admin@123` | Full administrative CRUD, scheduling, alert management |
-| **Field Inspector** | `inspector@inspect-ai.local` | `Inspector@123` | Inspection status updates, evidence upload & verification |
-| **NGO Auditor** | `ngo@inspect-ai.local` | `Ngo@123` | Read-only analytics & reporting views (mutations blocked) |
-
----
-
 ## 🚀 CI/CD Pipeline
 
 Continuous Integration is powered by GitHub Actions (`.github/workflows/ci.yml`). It executes automated typechecking, Python module compilation, pytest test runs, and Vite production bundle builds on every push to `main`.

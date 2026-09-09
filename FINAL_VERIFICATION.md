@@ -58,11 +58,3 @@ A comprehensive 28-phase audit, hardening, refactoring, and test suite expansion
 | 32 | CI passes | **PASS** | `.github/workflows/ci.yml` configured and clean |
 
 ---
-
-## Seed Credentials
-
-| Role | Email | Password |
-| :--- | :--- | :--- |
-| **Ministry Admin** | `admin@inspect-ai.local` | `Admin@123` |
-| **Field Inspector** | `inspector@inspect-ai.local` | `Inspector@123` |
-| **NGO Auditor** | `ngo@inspect-ai.local` | `Ngo@123` |
