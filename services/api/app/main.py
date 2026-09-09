@@ -1,14 +1,21 @@
+import os
 import io
 import csv
+import uuid
 from datetime import datetime, timezone, timedelta
 from hashlib import sha256
 from typing import Optional, List, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from services.api.app.database import get_db, Base, engine
 from services.api.app.models import (
@@ -19,6 +26,10 @@ from services.api.app.auth import (
 )
 from services.api.app.seed import seed_database
 from services.ai.anomaly import analyze_institution
+
+# Ensure uploads directory exists
+UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Seed database on startup
 seed_database()
@@ -222,7 +233,11 @@ def list_institutions(
     return results
 
 @app.post("/api/institutions")
-def create_institution(req: InstitutionCreate, db: Session = Depends(get_db)):
+def create_institution(
+    req: InstitutionCreate,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry"]))
+):
     count = db.query(InstitutionDB).count()
     new_id = f"INS-{count + 1:03d}"
     inst = InstitutionDB(
@@ -297,7 +312,12 @@ def get_institution(id: str, db: Session = Depends(get_db)):
     return data
 
 @app.patch("/api/institutions/{id}")
-def update_institution(id: str, req: InstitutionUpdate, db: Session = Depends(get_db)):
+def update_institution(
+    id: str,
+    req: InstitutionUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry"]))
+):
     inst = db.query(InstitutionDB).filter(InstitutionDB.id == id).first()
     if not inst:
         raise HTTPException(status_code=404, detail="Institution not found")
@@ -342,7 +362,11 @@ def update_institution(id: str, req: InstitutionUpdate, db: Session = Depends(ge
     return get_institution_with_risk(inst, db)
 
 @app.delete("/api/institutions/{id}")
-def delete_institution(id: str, db: Session = Depends(get_db)):
+def delete_institution(
+    id: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry"]))
+):
     inst = db.query(InstitutionDB).filter(InstitutionDB.id == id).first()
     if not inst:
         raise HTTPException(status_code=404, detail="Institution not found")
@@ -352,7 +376,11 @@ def delete_institution(id: str, db: Session = Depends(get_db)):
 
 # AI Engine
 @app.post("/api/ai/analyze")
-def analyze_ai_endpoint(req: dict, db: Session = Depends(get_db)):
+def analyze_ai_endpoint(
+    req: dict,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"]))
+):
     institution_id = req.get("institution_id")
     if institution_id:
         inst = db.query(InstitutionDB).filter(InstitutionDB.id == institution_id).first()
@@ -415,7 +443,11 @@ def list_inspections(
     return results
 
 @app.post("/api/inspections")
-def create_inspection(req: InspectionCreate, db: Session = Depends(get_db)):
+def create_inspection(
+    req: InspectionCreate,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry"]))
+):
     inst = db.query(InstitutionDB).filter(InstitutionDB.id == req.institution_id).first()
     if not inst:
         raise HTTPException(status_code=404, detail="Institution not found")
@@ -478,7 +510,12 @@ def get_inspection(id: str, db: Session = Depends(get_db)):
     }
 
 @app.patch("/api/inspections/{id}")
-def update_inspection(id: str, req: InspectionUpdate, db: Session = Depends(get_db)):
+def update_inspection(
+    id: str,
+    req: InspectionUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"]))
+):
     insp = db.query(InspectionDB).filter(InspectionDB.id == id).first()
     if not insp:
         raise HTTPException(status_code=404, detail="Inspection not found")
@@ -492,20 +529,39 @@ def update_inspection(id: str, req: InspectionUpdate, db: Session = Depends(get_
     db.refresh(insp)
     return get_inspection(id, db)
 
-# Evidence
+# Evidence Persistence & Verification
 @app.post("/api/evidence/upload")
-async def upload_evidence(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_evidence(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"]))
+):
     content = await file.read()
     file_hash = sha256(content).hexdigest()
+    
+    unique_filename = f"{uuid.uuid4().hex[:12]}_{file.filename}"
+    file_path = os.path.join(UPLOAD_DIR, unique_filename)
+    
+    with open(file_path, "wb") as f:
+        f.write(content)
+        
     return {
         "filename": file.filename,
+        "saved_filename": unique_filename,
+        "storage_path": file_path,
+        "mime_type": file.content_type or "application/octet-stream",
+        "file_size": len(content),
         "sha256": file_hash,
         "verified": True,
         "uploaded_at": datetime.now(timezone.utc).isoformat()
     }
 
 @app.post("/api/evidence/verify")
-def verify_evidence(req: EvidenceVerify, db: Session = Depends(get_db)):
+def verify_evidence(
+    req: EvidenceVerify,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"]))
+):
     now = datetime.now(timezone.utc)
     delta = abs((now - req.captured_at.astimezone(timezone.utc)).total_seconds())
     gps_valid = (req.latitude != 0.0) and (req.longitude != 0.0)
@@ -517,12 +573,23 @@ def verify_evidence(req: EvidenceVerify, db: Session = Depends(get_db)):
     is_verified = gps_valid and time_valid and officer_valid and institution_valid and hash_valid
 
     count = db.query(EvidenceDB).count()
+    saved_filename = f"evidence_{req.inspection_id}.jpg"
+    storage_path = os.path.join(UPLOAD_DIR, saved_filename)
+    
+    # Write a placeholder if not created by file upload
+    if not os.path.exists(storage_path):
+        with open(storage_path, "wb") as f:
+            f.write(b"INSPECT-AI-EVIDENCE-PAYLOAD")
+
     evidence_rec = EvidenceDB(
         id=f"EVD-{501 + count}",
         institution_id=req.institution_id,
         inspection_id=req.inspection_id,
         officer_id=req.officer_id,
-        file_name=f"evidence_{req.inspection_id}.jpg",
+        file_name=saved_filename,
+        mime_type="image/jpeg",
+        file_size=os.path.getsize(storage_path) if os.path.exists(storage_path) else 27,
+        storage_path=storage_path,
         sha256_hash=req.sha256_hash or sha256(f"{req.institution_id}:{req.captured_at}".encode()).hexdigest(),
         latitude=req.latitude,
         longitude=req.longitude,
@@ -556,7 +623,8 @@ def verify_evidence(req: EvidenceVerify, db: Session = Depends(get_db)):
         "id": evidence_rec.id,
         "verified": is_verified,
         "checks": evidence_rec.verification_checks,
-        "sha256": evidence_rec.sha256_hash
+        "sha256": evidence_rec.sha256_hash,
+        "storage_path": evidence_rec.storage_path
     }
 
 @app.get("/api/evidence")
@@ -572,6 +640,9 @@ def list_evidence(db: Session = Depends(get_db)):
             "inspection_id": ev.inspection_id,
             "officer_id": ev.officer_id,
             "file_name": ev.file_name,
+            "mime_type": ev.mime_type or "image/jpeg",
+            "file_size": ev.file_size or 0,
+            "storage_path": ev.storage_path,
             "sha256_hash": ev.sha256_hash,
             "latitude": ev.latitude,
             "longitude": ev.longitude,
@@ -580,6 +651,13 @@ def list_evidence(db: Session = Depends(get_db)):
             "checks": ev.verification_checks
         })
     return results
+
+@app.get("/api/evidence/{id}/file")
+def get_evidence_file(id: str, db: Session = Depends(get_db)):
+    ev = db.query(EvidenceDB).filter(EvidenceDB.id == id).first()
+    if not ev or not ev.storage_path or not os.path.exists(ev.storage_path):
+        raise HTTPException(status_code=404, detail="Evidence file not found")
+    return FileResponse(ev.storage_path, media_type=ev.mime_type or "image/jpeg", filename=ev.file_name)
 
 # Alerts
 @app.get("/api/alerts")
@@ -603,7 +681,11 @@ def list_alerts(status: Optional[str] = None, db: Session = Depends(get_db)):
     ]
 
 @app.patch("/api/alerts/{id}/acknowledge")
-def acknowledge_alert(id: str, db: Session = Depends(get_db)):
+def acknowledge_alert(
+    id: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry"]))
+):
     alert = db.query(AlertDB).filter(AlertDB.id == id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")

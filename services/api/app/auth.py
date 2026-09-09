@@ -5,12 +5,17 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
+from dotenv import load_dotenv
+
+# Load environment variables if .env exists
+load_dotenv()
+
 from services.api.app.database import get_db
 from services.api.app.models import UserDB
 
 SECRET_KEY = os.getenv("JWT_SECRET", "inspect-ai-super-secret-key-26095")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -52,7 +57,16 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 def require_role(allowed_roles: list[str]):
     def role_checker(current_user: UserDB = Depends(get_current_user)):
-        if current_user.role not in allowed_roles:
+        user_role = (current_user.role or "").lower()
+        normalized_allowed = [r.lower() for r in allowed_roles]
+        
+        # Support aliases like ministry <-> ministry_admin
+        if "ministry_admin" in normalized_allowed and "ministry" not in normalized_allowed:
+            normalized_allowed.append("ministry")
+        if "ministry" in normalized_allowed and "ministry_admin" not in normalized_allowed:
+            normalized_allowed.append("ministry_admin")
+            
+        if user_role not in normalized_allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Role '{current_user.role}' is not authorized to perform this action"

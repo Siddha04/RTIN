@@ -1,12 +1,35 @@
+import os
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from services.api.app.database import engine, Base, SessionLocal
 from services.api.app.models import UserDB, InstitutionDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB
 from services.api.app.auth import hash_password
 from services.ai.anomaly import analyze_institution
 
+UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def migrate_schema_if_needed():
+    """Ensure missing columns in existing SQLite tables are dynamically added."""
+    with engine.connect() as conn:
+        try:
+            # Check if mime_type exists in evidence table
+            result = conn.execute(text("PRAGMA table_info(evidence);"))
+            columns = [row[1] for row in result.fetchall()]
+            if columns and "mime_type" not in columns:
+                conn.execute(text("ALTER TABLE evidence ADD COLUMN mime_type VARCHAR;"))
+                conn.execute(text("ALTER TABLE evidence ADD COLUMN file_size INTEGER DEFAULT 0;"))
+                conn.execute(text("ALTER TABLE evidence ADD COLUMN storage_path VARCHAR;"))
+                conn.commit()
+        except Exception as e:
+            # Postgres or non-sqlite engine will fail PRAGMA table_info gracefully
+            pass
+
 def seed_database():
     Base.metadata.create_all(bind=engine)
+    migrate_schema_if_needed()
+    
     db: Session = SessionLocal()
     try:
         if db.query(UserDB).count() == 0:
@@ -66,6 +89,11 @@ def seed_database():
             db.commit()
 
         if db.query(EvidenceDB).count() == 0:
+            sample_file_path = os.path.join(UPLOAD_DIR, "salem_hss_verification_photo.jpg")
+            if not os.path.exists(sample_file_path):
+                with open(sample_file_path, "wb") as f:
+                    f.write(b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00INSPECT_AI_SEED_EVIDENCE_PHOTO")
+
             evidence = [
                 EvidenceDB(
                     id="EVD-501",
@@ -73,6 +101,9 @@ def seed_database():
                     inspection_id="INSP-1003",
                     officer_id="USR-02",
                     file_name="salem_hss_verification_photo.jpg",
+                    mime_type="image/jpeg",
+                    file_size=os.path.getsize(sample_file_path),
+                    storage_path=sample_file_path,
                     sha256_hash="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                     latitude=11.6643,
                     longitude=78.1460,
