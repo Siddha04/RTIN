@@ -1,0 +1,9 @@
+node_modules/
+.expo/
+dist/
+.vite/
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store
