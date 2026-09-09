@@ -5,3 +5,5 @@ python-jose[cryptography]==3.5.0
 scikit-learn==1.7.1
 numpy==2.3.2
 python-multipart==0.0.20
+sqlalchemy==2.0.38
+pyjwt==2.10.1
