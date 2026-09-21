@@ -79,4 +79,5 @@ def test_final_ml_pipeline_contract():
         inspectors,
         recent_pairings={("USR-01", "INS-001")},
     )
-    assert [row["institution"].id for row in assignments] == ["INS-002", "INS-003"]
+    assert [row["institution"].id for row in assignments] == ["INS-003", "INS-002"]
+    assert all(row["institution"].id != "INS-001" for row in assignments)
