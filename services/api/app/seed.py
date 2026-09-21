@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from services.api.app.database import engine, Base, SessionLocal
 from services.api.app.models import (
-    UserDB, InstitutionDB, InstitutionMetricDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
+    UserDB, InstitutionDB, InstitutionMetricDB, ExternalDataObservationDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
     CCTVFeedDB, VCSessionDB, BeneficiaryDB, BiometricPunchDB, ComplianceNoticeDB, AtrReportDB
 )
 from services.api.app.auth import hash_password
@@ -56,6 +56,7 @@ def migrate_schema_if_needed():
                 "institution_metrics": {
                     "outcome_label": "INTEGER",
                 },
+                "external_data_observations": {},
             }
 
             for table_name, definitions in column_definitions.items():
@@ -129,6 +130,9 @@ def migrate_schema_if_needed():
                 if "scheme_name" not in cols:
                     conn.execute(text("ALTER TABLE inspections ADD COLUMN scheme_name VARCHAR;"))
                 conn.commit()
+
+            # External data observations are created by Base.metadata.create_all.
+            # They do not require ALTER TABLE because this table is introduced as part of Phase 7.
 
             # Check institution_metrics columns
             res = conn.execute(text("PRAGMA table_info(institution_metrics);"))
