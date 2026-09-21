@@ -1195,8 +1195,13 @@ def submit_biometric_punch(
         raise HTTPException(status_code=404, detail="Institution not found")
 
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cctv_est = req.cctv_estimated_headcount or int(req.beneficiaries_present * 0.85)
-    variance_flag = abs(req.beneficiaries_present - cctv_est) > (req.beneficiaries_total * 0.20)
+    cctv_est = req.cctv_estimated_headcount
+    if cctv_est is None:
+        cctv_est = int(req.beneficiaries_present * 0.85)
+
+    variance_flag = abs(req.beneficiaries_present - cctv_est) > (
+        req.beneficiaries_total * 0.20
+    )
 
     punch = BiometricPunchDB(
         id=f"PUNCH-{uuid.uuid4().hex[:8]}",
@@ -1213,45 +1218,24 @@ def submit_biometric_punch(
     )
     db.add(punch)
 
-    # Update institution attendance percentage
     if req.beneficiaries_total > 0:
-        inst.attendance = round((req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1)
+        inst.attendance = round(
+            (req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1
+        )
         inst.beneficiaries = req.beneficiaries_total
 
-@app.post("/api/biometric/punch")
-def submit_biometric_punch(
-    req: BiometricPunchCreate,
-    current_user: UserDB = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    inst = db.query(InstitutionDB).filter(InstitutionDB.id == req.institution_id).first()
-    if not inst:
-        raise HTTPException(status_code=404, detail="Institution not found")
+    db.commit()
+    db.refresh(punch)
 
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cctv_est = req.cctv_estimated_headcount or int(req.beneficiaries_present * 0.85)
-    variance_flag = abs(req.beneficiaries_present - cctv_est) > (req.beneficiaries_total * 0.20)
-
-    punch = BiometricPunchDB(
-        id=f"PUNCH-{uuid.uuid4().hex[:8]}",
-        institution_id=req.institution_id,
-        date=today_str,
-        shift=req.shift,
-        staff_present=req.staff_present,
-        staff_total=req.staff_total,
-        beneficiaries_present=req.beneficiaries_present,
-        beneficiaries_total=req.beneficiaries_total,
-        cctv_estimated_headcount=cctv_est,
-        variance_flag=variance_flag,
-        uploaded_at=datetime.now(timezone.utc)
+    record_snapshot(
+        db,
+        inst,
+        source="BIOMETRIC",
+        cctv_headcount=cctv_est,
     )
-    db.add(punch)
 
-    # Update institution attendance percentage
-    if req.beneficiaries_total > 0:
-        inst.attendance = round((req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1)
-        inst.beneficiaries = req.beneficiaries_total
-
+    return {
+        "status": "SUBMITTED",
         "punch_id": punch.id,
         "date": today_str,
         "shift": req.shift,
@@ -1259,6 +1243,7 @@ def submit_biometric_punch(
         "variance_flag": variance_flag,
         "message": "Daily biometric attendance synchronized with DoSJE Central Server."
     }
+
 
 @app.get("/api/biometric/history")
 def get_biometric_history(
