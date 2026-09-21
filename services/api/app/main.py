@@ -453,6 +453,14 @@ def record_ai_history(
 
     if req.cctv_headcount is not None and req.cctv_headcount < 0:
         raise HTTPException(status_code=400, detail="cctv_headcount cannot be negative")
+    if req.outcome_label is not None:
+        if current_user.role not in {"ministry", "inspector"}:
+            raise HTTPException(
+                status_code=403,
+                detail="Only ministry or inspector users can submit confirmed outcome labels",
+            )
+        if req.outcome_label not in {0, 1}:
+            raise HTTPException(status_code=400, detail="outcome_label must be 0 or 1")
 
     row = record_snapshot(
         db,
