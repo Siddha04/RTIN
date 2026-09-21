@@ -1,0 +1,15 @@
+{
+  "name": "inspect-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "INSPECT-AI Smart Real-Time Monitoring & Inspection Platform",
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "dev:web": "npm --prefix apps/web run dev",
+    "dev:backend": ".venv\\Scripts\\uvicorn services.api.app.main:app --reload --port 8000",
+    "build": "npm --prefix apps/web run build",
+    "preview": "npm --prefix apps/web run preview",
+    "mobile": "npm --prefix apps/mobile start",
+    "test": "cmd /c \"set PYTHONPATH=. && .venv\\Scripts\\python.exe -m pytest\""
+  }
+}

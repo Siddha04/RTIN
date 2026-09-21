@@ -6,11 +6,18 @@ interface AuthContextType {
   token: string | null;
   loading: boolean;
   login: (email: string, pass: string) => Promise<void>;
+  switchRole: (role: "ministry" | "ngo" | "inspector") => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+const DEMO_CREDENTIALS = {
+  ministry: { email: "admin@inspect-ai.local", pass: "Admin@123" },
+  ngo: { email: "ngo@inspect-ai.local", pass: "Ngo@123" },
+  inspector: { email: "inspector@inspect-ai.local", pass: "Inspector@123" }
+};
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(() => {
@@ -42,12 +49,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       id: "USR-LOGGED",
       email: res.email,
       role: res.role,
-      full_name: res.full_name
+      full_name: res.full_name,
+      assigned_district: res.assigned_district,
+      institution_id: res.institution_id
     };
     setToken(res.access_token);
     setUser(userObj);
     localStorage.setItem("inspect_ai_token", res.access_token);
     localStorage.setItem("inspect_ai_user", JSON.stringify(userObj));
+  };
+
+  const switchRole = async (targetRole: "ministry" | "ngo" | "inspector" | "district") => {
+    const creds = DEMO_CREDENTIALS[targetRole];
+    if (creds) {
+      await login(creds.email, creds.pass);
+    }
   };
 
   const logout = () => {
@@ -64,6 +80,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         token,
         loading,
         login,
+        switchRole,
         logout,
         isAuthenticated: !!token && !!user
       }}
