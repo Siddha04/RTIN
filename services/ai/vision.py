@@ -216,7 +216,7 @@ def track_people(
                 class_id=0,
                 confidence=float(score),
                 x1=x1,
-                y1=y2 if False else y1,
+                y1=y1,
                 x2=x2,
                 y2=y2,
                 track_id=None if track_id is None else int(track_id),
@@ -230,6 +230,7 @@ def analyze_stream_once(
     *,
     model_path: str | None = None,
     confidence: float = 0.35,
+    tracking: bool = False,
 ) -> dict[str, Any]:
     """Capture one frame and run person detection on it."""
     try:
@@ -253,13 +254,22 @@ def analyze_stream_once(
     if frame is None:
         raise VisionCaptureError("Captured JPEG could not be decoded")
 
-    detections = detect_people(
-        frame,
-        model_path=model_path,
-        confidence=confidence,
+    detections = (
+        track_people(
+            frame,
+            model_path=model_path,
+            confidence=confidence,
+        )
+        if tracking
+        else detect_people(
+            frame,
+            model_path=model_path,
+            confidence=confidence,
+        )
     )
     return {
         "person_count": len(detections),
+        "tracking_enabled": tracking,
         "detections": [
             {
                 "confidence": round(d.confidence, 4),
