@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from services.api.app.database import engine, Base, SessionLocal
 from services.api.app.models import (
     UserDB, InstitutionDB, InstitutionMetricDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
@@ -14,7 +14,68 @@ UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uplo
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 def migrate_schema_if_needed():
-    """Ensure missing columns in existing SQLite tables are dynamically added."""
+    """Ensure existing databases contain all columns used by the current models."""
+    if engine.dialect.name != "sqlite":
+        with engine.connect() as conn:
+            inspector = inspect(engine)
+
+            column_definitions = {
+                "users": {
+                    "assigned_district": "VARCHAR",
+                    "home_district": "VARCHAR",
+                    "institution_id": "VARCHAR",
+                },
+                "institutions": {
+                    "scheme": "VARCHAR DEFAULT 'DDRS'",
+                    "scheme_category": "VARCHAR DEFAULT 'Rehabilitation'",
+                    "sanctioned_capacity": "INTEGER DEFAULT 50",
+                    "cctv_enabled": "BOOLEAN DEFAULT TRUE",
+                    "biometric_enabled": "BOOLEAN DEFAULT TRUE",
+                    "contact_person": "VARCHAR DEFAULT 'Project Director'",
+                    "contact_phone": "VARCHAR DEFAULT '+91-9876543210'",
+                },
+                "inspections": {
+                    "is_surprise": "BOOLEAN DEFAULT FALSE",
+                    "sealed_until": "TIMESTAMP",
+                    "geofence_verified": "BOOLEAN DEFAULT FALSE",
+                    "check_in_lat": "DOUBLE PRECISION",
+                    "check_in_lng": "DOUBLE PRECISION",
+                    "distance_to_target_meters": "DOUBLE PRECISION",
+                    "scheme_name": "VARCHAR",
+                },
+                "risk_analyses": {
+                    "ghost_beneficiary_score": "DOUBLE PRECISION DEFAULT 0.0",
+                    "factors": "JSON",
+                    "peer_deviation_score": "DOUBLE PRECISION DEFAULT 0.0",
+                    "model_name": "VARCHAR",
+                    "model_version": "VARCHAR",
+                    "model_status": "VARCHAR",
+                    "reference_population_size": "INTEGER DEFAULT 0",
+                    "reference_scope": "VARCHAR",
+                },
+                "institution_metrics": {
+                    "outcome_label": "INTEGER",
+                },
+            }
+
+            for table_name, definitions in column_definitions.items():
+                if table_name not in inspector.get_table_names():
+                    continue
+                existing = {
+                    column["name"]
+                    for column in inspector.get_columns(table_name)
+                }
+                for column_name, sql_type in definitions.items():
+                    if column_name not in existing:
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {table_name} "
+                                f"ADD COLUMN {column_name} {sql_type}"
+                            )
+                        )
+            conn.commit()
+        return
+
     with engine.connect() as conn:
         try:
             # Check users columns

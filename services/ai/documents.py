@@ -1,7 +1,7 @@
 """Document OCR, classification and consistency analysis.
 
-OCR is optional and loaded lazily. Classification uses a supervised TF-IDF +
-LogisticRegression pipeline only when caller-supplied labeled examples are
+OCR is optional and loaded lazily. Classification uses a supervised TF-IDF
++ LogisticRegression pipeline only when caller-supplied labeled examples are
 available. No hidden document labels are embedded in the application.
 """
 
@@ -69,19 +69,19 @@ def ocr_image(image_bytes: bytes, language: str = "eng") -> OCRResult:
 
 
 def normalize_text(text: str) -> str:
-    return re.sub(r"s+", " ", text or "").strip()
+    return " ".join((text or "").split())
 
 
 def extract_fields(text: str) -> dict[str, Any]:
     normalized = normalize_text(text)
 
     patterns = {
-        "institution_id": r"(?:institution|inst)[s#:_-]*([A-Z]{2,8}-d{3,8})",
-        "attendance_rate": r"attendance(?:s+rate)?s*[:=-]s*(d{1,3}(?:.d+)?)s*%",
-        "beneficiary_count": r"beneficiar(?:y|ies)s*(?:count|total)?s*[:=-]s*(d{1,6})",
-        "grant_amount": r"(?:grant|fund|sanctioneds+amount)s*[:=-]s*(?:INR|Rs.?)?s*([d,]+(?:.d+)?)",
-        "reference_number": r"(?:reference|ref|file)s*(?:no|number)?s*[:=-]s*([A-Z0-9/_-]{4,40})",
-        "report_date": r"(?:reports+date|date)s*[:=-]s*(d{1,2}[/-]d{1,2}[/-]d{2,4})",
+        "institution_id": r"(?:institution|inst)[ ]*(?:id|no|number)?[ ]*[:#_-]?[ ]*([A-Z]{2,8}-[0-9]{3,8})(?:[^A-Z0-9]|$)",
+        "attendance_rate": r"attendance(?:[ ]+rate)?[ ]*[:=-][ ]*([0-9]{1,3}(?:[.][0-9]+)?)[ ]*%",
+        "beneficiary_count": r"beneficiar(?:y|ies)[ ]*(?:count|total)?[ ]*[:=-][ ]*([0-9]{1,6})(?:[^0-9]|$)",
+        "grant_amount": r"(?:grant(?:[ ]+amount)?|fund|sanctioned[ ]+amount)[ ]*[:=-][ ]*(?:INR|Rs[.]?)?[ ]*([0-9,]+(?:[.][0-9]+)?)",
+        "reference_number": r"(?:reference|ref|file)[ ]*(?:no|number)?[ ]*[:=-][ ]*([A-Z0-9/_-]{4,40})(?:[^A-Z0-9/_-]|$)",
+        "report_date": r"(?:report[ ]+date|date)[ ]*[:=-][ ]*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})(?:[^0-9/-]|$)",
     }
 
     output: dict[str, Any] = {}
