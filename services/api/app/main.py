@@ -19,7 +19,7 @@ load_dotenv()
 
 from services.api.app.database import get_db, Base, engine
 from services.api.app.models import (
-    UserDB, InstitutionDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
+    UserDB, InstitutionDB, InstitutionMetricDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
     CCTVFeedDB, VCSessionDB, BeneficiaryDB, BiometricPunchDB, ComplianceNoticeDB, AtrReportDB
 )
 from services.api.app.auth import (
@@ -27,6 +27,7 @@ from services.api.app.auth import (
 )
 from services.api.app.seed import seed_database
 from services.ai.anomaly import analyze_institution
+from services.ai.history import build_peer_reference, record_snapshot
 from services.api.app.cctv import get_institution_feeds, capture_cctv_snapshot
 from services.api.app.vc import pick_random_candidate, initiate_vc_call, finish_vc_call
 from services.api.app.assignment import allocate_inspections, haversine_distance_km
@@ -135,27 +136,44 @@ class AIHistoryRecordRequest(BaseModel):
 # --------------------------------------------------------------------------
 
 def get_institution_with_risk(inst: InstitutionDB, db: Session) -> Dict[str, Any]:
-    risk_rec = db.query(RiskAnalysisDB).filter(RiskAnalysisDB.institution_id == inst.id).first()
+    reference_data, reference_scope = build_peer_reference(db, inst)
+
+    analysis = analyze_institution({
+        "attendance": inst.attendance,
+        "beneficiaries": inst.beneficiaries,
+        "inspections": inst.inspections,
+        "report_variance": inst.report_variance,
+        "sanctioned_capacity": inst.sanctioned_capacity,
+    }, reference_data=reference_data)
+
+    risk_rec = db.query(RiskAnalysisDB).filter(
+        RiskAnalysisDB.institution_id == inst.id
+    ).first()
+
     if not risk_rec:
-        analysis = analyze_institution({
-            "attendance": inst.attendance,
-            "beneficiaries": inst.beneficiaries,
-            "inspections": inst.inspections,
-            "report_variance": inst.report_variance
-        })
         risk_rec = RiskAnalysisDB(
             id=f"RISK-{inst.id}",
             institution_id=inst.id,
-            anomaly=analysis["anomaly"],
-            anomaly_score=analysis["anomaly_score"],
-            risk_score=analysis["risk_score"],
-            risk_band=analysis["risk_band"],
-            recommendation=analysis["recommendation"],
-            reason=analysis["reason"]
         )
         db.add(risk_rec)
-        db.commit()
-        db.refresh(risk_rec)
+
+    risk_rec.anomaly = analysis["anomaly"]
+    risk_rec.anomaly_score = analysis["anomaly_score"]
+    risk_rec.risk_score = analysis["risk_score"]
+    risk_rec.risk_band = analysis["risk_band"]
+    risk_rec.ghost_beneficiary_score = analysis.get("ghost_beneficiary_score", 0.0)
+    risk_rec.recommendation = analysis["recommendation"]
+    risk_rec.reason = analysis["reason"]
+    risk_rec.factors = analysis.get("factors", [])
+    risk_rec.peer_deviation_score = analysis.get("peer_deviation_score", 0.0)
+    risk_rec.model_name = analysis.get("model_name")
+    risk_rec.model_version = analysis.get("model_version")
+    risk_rec.model_status = analysis.get("model_status")
+    risk_rec.reference_population_size = analysis.get("reference_population_size", 0)
+    risk_rec.reference_scope = reference_scope
+    risk_rec.analyzed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(risk_rec)
 
     return {
         "id": inst.id,
@@ -184,6 +202,12 @@ def get_institution_with_risk(inst: InstitutionDB, db: Session) -> Dict[str, Any
         "recommendation": risk_rec.recommendation,
         "reason": risk_rec.reason,
         "factors": getattr(risk_rec, "factors", []),
+        "peer_deviation_score": getattr(risk_rec, "peer_deviation_score", 0.0),
+        "model_name": getattr(risk_rec, "model_name", None),
+        "model_version": getattr(risk_rec, "model_version", None),
+        "model_status": getattr(risk_rec, "model_status", None),
+        "reference_population_size": getattr(risk_rec, "reference_population_size", 0),
+        "reference_scope": getattr(risk_rec, "reference_scope", None),
         "analyzed_at": risk_rec.analyzed_at.isoformat() if risk_rec.analyzed_at else None
     }
 
@@ -291,12 +315,15 @@ def create_institution(
     db.refresh(inst)
     record_snapshot(db, inst, source="INSTITUTION_CREATED")
 
-    analysis = analyze_institution({
-        "attendance": inst.attendance,
-        "beneficiaries": inst.beneficiaries,
-        "inspections": inst.inspections,
-        "report_variance": inst.report_variance
-    })
+    analysis_view = get_institution_with_risk(inst, db)
+    analysis = {
+        "anomaly": analysis_view["anomaly"],
+        "risk_score": analysis_view["risk_score"],
+        "risk_band": analysis_view["risk_band"],
+        "recommendation": analysis_view["recommendation"],
+        "reason": analysis_view["reason"],
+        "factors": analysis_view["factors"],
+    }
     risk_rec = RiskAnalysisDB(
         id=f"RISK-{inst.id}",
         institution_id=inst.id,
@@ -365,38 +392,9 @@ def update_institution(
     db.refresh(inst)
     record_snapshot(db, inst, source="INSTITUTION_UPDATED")
 
-    # Re-run AI analysis
-    analysis = analyze_institution({
-        "attendance": inst.attendance,
-        "beneficiaries": inst.beneficiaries,
-        "inspections": inst.inspections,
-        "report_variance": inst.report_variance
-    })
-    risk_rec = db.query(RiskAnalysisDB).filter(RiskAnalysisDB.institution_id == id).first()
-    if risk_rec:
-        risk_rec.anomaly = analysis["anomaly"]
-        risk_rec.anomaly_score = analysis["anomaly_score"]
-        risk_rec.risk_score = analysis["risk_score"]
-        risk_rec.risk_band = analysis["risk_band"]
-        risk_rec.recommendation = analysis["recommendation"]
-        risk_rec.reason = analysis["reason"]
-        risk_rec.analyzed_at = datetime.now(timezone.utc)
-    else:
-        risk_rec = RiskAnalysisDB(
-            id=f"RISK-{inst.id}",
-            institution_id=inst.id,
-            anomaly=analysis["anomaly"],
-            anomaly_score=analysis["anomaly_score"],
-            risk_score=analysis["risk_score"],
-            risk_band=analysis["risk_band"],
-            recommendation=analysis["recommendation"],
-            reason=analysis["reason"]
-        )
-        db.add(risk_rec)
-    db.commit()
-
+    # Re-run database-backed AI analysis after persisting the new snapshot.
+    record_snapshot(db, inst, source="INSTITUTION_UPDATED")
     return get_institution_with_risk(inst, db)
-
 @app.delete("/api/institutions/{id}")
 def delete_institution(
     id: str,
