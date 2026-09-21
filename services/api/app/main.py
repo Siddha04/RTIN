@@ -125,6 +125,11 @@ class EvidenceVerify(BaseModel):
     captured_at: datetime
     sha256_hash: Optional[str] = None
 
+class AIHistoryRecordRequest(BaseModel):
+    institution_id: str
+    source: str = "API"
+    cctv_headcount: Optional[int] = None
+
 # --------------------------------------------------------------------------
 # Helper Functions
 # --------------------------------------------------------------------------
@@ -284,6 +289,7 @@ def create_institution(
     db.add(inst)
     db.commit()
     db.refresh(inst)
+    record_snapshot(db, inst, source="INSTITUTION_CREATED")
 
     analysis = analyze_institution({
         "attendance": inst.attendance,
@@ -357,6 +363,7 @@ def update_institution(
     
     db.commit()
     db.refresh(inst)
+    record_snapshot(db, inst, source="INSTITUTION_UPDATED")
 
     # Re-run AI analysis
     analysis = analyze_institution({
@@ -413,28 +420,75 @@ def analyze_ai_endpoint(
     institution_id = req.get("institution_id")
     if institution_id:
         inst = db.query(InstitutionDB).filter(InstitutionDB.id == institution_id).first()
-        if inst:
-            req = {
-                "attendance": inst.attendance,
-                "beneficiaries": inst.beneficiaries,
-                "inspections": inst.inspections,
-                "report_variance": inst.report_variance
-            }
-            analysis = analyze_institution(req)
-            risk_rec = db.query(RiskAnalysisDB).filter(RiskAnalysisDB.institution_id == institution_id).first()
-            if risk_rec:
-                risk_rec.anomaly = analysis["anomaly"]
-                risk_rec.anomaly_score = analysis["anomaly_score"]
-                risk_rec.risk_score = analysis["risk_score"]
-                risk_rec.risk_band = analysis["risk_band"]
-                risk_rec.recommendation = analysis["recommendation"]
-                risk_rec.reason = analysis["reason"]
-                risk_rec.analyzed_at = datetime.now(timezone.utc)
-                db.commit()
-            return {**analysis, "institution_id": institution_id, "analyzed_at": datetime.now(timezone.utc).isoformat()}
+        if not inst:
+            raise HTTPException(status_code=404, detail="Institution not found")
+        return get_institution_with_risk(inst, db)
 
     analysis = analyze_institution(req)
     return {**analysis, "analyzed_at": datetime.now(timezone.utc).isoformat()}
+
+
+@app.post("/api/ai/history")
+def record_ai_history(
+    req: AIHistoryRecordRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    inst = db.query(InstitutionDB).filter(
+        InstitutionDB.id == req.institution_id,
+        InstitutionDB.status == "active",
+    ).first()
+    if not inst:
+        raise HTTPException(status_code=404, detail="Institution not found")
+
+    if req.cctv_headcount is not None and req.cctv_headcount < 0:
+        raise HTTPException(status_code=400, detail="cctv_headcount cannot be negative")
+
+    row = record_snapshot(
+        db,
+        inst,
+        source=req.source.strip().upper()[:32] or "API",
+        cctv_headcount=req.cctv_headcount,
+    )
+    analysis = get_institution_with_risk(inst, db)
+
+    return {
+        "history_id": row.id,
+        "institution_id": inst.id,
+        "recorded_at": row.recorded_at.isoformat() if row.recorded_at else None,
+        "source": row.source,
+        "reference_population_size": analysis["reference_population_size"],
+        "model_status": analysis["model_status"],
+        "risk_score": analysis["risk_score"],
+    }
+
+
+@app.get("/api/ai/history/{institution_id}")
+def get_ai_history(
+    institution_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    rows = db.query(InstitutionMetricDB).filter(
+        InstitutionMetricDB.institution_id == institution_id
+    ).order_by(InstitutionMetricDB.recorded_at.desc()).limit(100).all()
+
+    return [
+        {
+            "id": row.id,
+            "institution_id": row.institution_id,
+            "scheme": row.scheme,
+            "attendance": row.attendance,
+            "beneficiaries": row.beneficiaries,
+            "inspections": row.inspections,
+            "report_variance": row.report_variance,
+            "sanctioned_capacity": row.sanctioned_capacity,
+            "cctv_headcount": row.cctv_headcount,
+            "source": row.source,
+            "recorded_at": row.recorded_at.isoformat() if row.recorded_at else None,
+        }
+        for row in rows
+    ]
 
 # Inspections
 @app.get("/api/inspections")
@@ -1112,10 +1166,40 @@ def submit_biometric_punch(
         inst.attendance = round((req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1)
         inst.beneficiaries = req.beneficiaries_total
 
-    db.commit()
+@app.post("/api/biometric/punch")
+def submit_biometric_punch(
+    req: BiometricPunchCreate,
+    current_user: UserDB = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    inst = db.query(InstitutionDB).filter(InstitutionDB.id == req.institution_id).first()
+    if not inst:
+        raise HTTPException(status_code=404, detail="Institution not found")
 
-    return {
-        "status": "SUBMITTED",
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cctv_est = req.cctv_estimated_headcount or int(req.beneficiaries_present * 0.85)
+    variance_flag = abs(req.beneficiaries_present - cctv_est) > (req.beneficiaries_total * 0.20)
+
+    punch = BiometricPunchDB(
+        id=f"PUNCH-{uuid.uuid4().hex[:8]}",
+        institution_id=req.institution_id,
+        date=today_str,
+        shift=req.shift,
+        staff_present=req.staff_present,
+        staff_total=req.staff_total,
+        beneficiaries_present=req.beneficiaries_present,
+        beneficiaries_total=req.beneficiaries_total,
+        cctv_estimated_headcount=cctv_est,
+        variance_flag=variance_flag,
+        uploaded_at=datetime.now(timezone.utc)
+    )
+    db.add(punch)
+
+    # Update institution attendance percentage
+    if req.beneficiaries_total > 0:
+        inst.attendance = round((req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1)
+        inst.beneficiaries = req.beneficiaries_total
+
         "punch_id": punch.id,
         "date": today_str,
         "shift": req.shift,
