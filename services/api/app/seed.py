@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from services.api.app.database import engine, Base, SessionLocal
 from services.api.app.models import (
-    UserDB, InstitutionDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
+    UserDB, InstitutionDB, InstitutionMetricDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
     CCTVFeedDB, VCSessionDB, BeneficiaryDB, BiometricPunchDB, ComplianceNoticeDB, AtrReportDB
 )
 from services.api.app.auth import hash_password
@@ -77,6 +77,18 @@ def migrate_schema_if_needed():
                     conn.execute(text("ALTER TABLE risk_analyses ADD COLUMN ghost_beneficiary_score FLOAT DEFAULT 0.0;"))
                 if "factors" not in cols:
                     conn.execute(text("ALTER TABLE risk_analyses ADD COLUMN factors JSON;"))
+                if "peer_deviation_score" not in cols:
+                    conn.execute(text("ALTER TABLE risk_analyses ADD COLUMN peer_deviation_score FLOAT DEFAULT 0.0;"))
+                if "model_name" not in cols:
+                    conn.execute(text("ALTER TABLE risk_analyses ADD COLUMN model_name VARCHAR;"))
+                if "model_version" not in cols:
+                    conn.execute(text("ALTER TABLE risk_analyses ADD COLUMN model_version VARCHAR;"))
+                if "model_status" not in cols:
+                    conn.execute(text("ALTER TABLE risk_analyses ADD COLUMN model_status VARCHAR;"))
+                if "reference_population_size" not in cols:
+                    conn.execute(text("ALTER TABLE risk_analyses ADD COLUMN reference_population_size INTEGER DEFAULT 0;"))
+                if "reference_scope" not in cols:
+                    conn.execute(text("ALTER TABLE risk_analyses ADD COLUMN reference_scope VARCHAR;"))
                 conn.commit()
         except Exception:
             pass

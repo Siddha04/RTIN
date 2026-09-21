@@ -40,6 +40,23 @@ class InstitutionDB(Base):
     status = Column(String, default="active")
     created_at = Column(DateTime(timezone=True), default=utc_now)
 
+class InstitutionMetricDB(Base):
+    __tablename__ = "institution_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    institution_id = Column(String, nullable=False, index=True)
+    scheme = Column(String, nullable=False, index=True)
+    attendance = Column(Float, nullable=False, default=0.0)
+    beneficiaries = Column(Integer, nullable=False, default=0)
+    inspections = Column(Integer, nullable=False, default=0)
+    report_variance = Column(Float, nullable=False, default=0.0)
+    sanctioned_capacity = Column(Integer, nullable=False, default=0)
+    cctv_headcount = Column(Integer, nullable=True)
+    source = Column(String, nullable=False, default="SYSTEM")
+    recorded_at = Column(DateTime(timezone=True), default=utc_now, index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
 class InspectionDB(Base):
     __tablename__ = "inspections"
 
@@ -106,6 +123,12 @@ class RiskAnalysisDB(Base):
     recommendation = Column(String, nullable=False)
     reason = Column(String, nullable=False)
     factors = Column(JSON, nullable=True)
+    peer_deviation_score = Column(Float, default=0.0)
+    model_name = Column(String, nullable=True)
+    model_version = Column(String, nullable=True)
+    model_status = Column(String, nullable=True)
+    reference_population_size = Column(Integer, default=0)
+    reference_scope = Column(String, nullable=True)
     analyzed_at = Column(DateTime(timezone=True), default=utc_now)
 
 class CCTVFeedDB(Base):

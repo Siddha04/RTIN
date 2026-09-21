@@ -19,7 +19,7 @@ load_dotenv()
 
 from services.api.app.database import get_db, Base, engine
 from services.api.app.models import (
-    UserDB, InstitutionDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
+    UserDB, InstitutionDB, InstitutionMetricDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
     CCTVFeedDB, VCSessionDB, BeneficiaryDB, BiometricPunchDB, ComplianceNoticeDB, AtrReportDB
 )
 from services.api.app.auth import (
@@ -27,6 +27,7 @@ from services.api.app.auth import (
 )
 from services.api.app.seed import seed_database
 from services.ai.anomaly import analyze_institution
+from services.ai.history import build_peer_reference, record_snapshot
 from services.api.app.cctv import get_institution_feeds, capture_cctv_snapshot
 from services.api.app.vc import pick_random_candidate, initiate_vc_call, finish_vc_call
 from services.api.app.assignment import allocate_inspections, haversine_distance_km
@@ -125,32 +126,54 @@ class EvidenceVerify(BaseModel):
     captured_at: datetime
     sha256_hash: Optional[str] = None
 
+class AIHistoryRecordRequest(BaseModel):
+    institution_id: str
+    source: str = "API"
+    cctv_headcount: Optional[int] = None
+
 # --------------------------------------------------------------------------
 # Helper Functions
 # --------------------------------------------------------------------------
 
 def get_institution_with_risk(inst: InstitutionDB, db: Session) -> Dict[str, Any]:
-    risk_rec = db.query(RiskAnalysisDB).filter(RiskAnalysisDB.institution_id == inst.id).first()
+    reference_data, reference_scope = build_peer_reference(db, inst)
+
+    analysis = analyze_institution({
+        "attendance": inst.attendance,
+        "beneficiaries": inst.beneficiaries,
+        "inspections": inst.inspections,
+        "report_variance": inst.report_variance,
+        "sanctioned_capacity": inst.sanctioned_capacity,
+    }, reference_data=reference_data)
+
+    risk_rec = db.query(RiskAnalysisDB).filter(
+        RiskAnalysisDB.institution_id == inst.id
+    ).first()
+
     if not risk_rec:
-        analysis = analyze_institution({
-            "attendance": inst.attendance,
-            "beneficiaries": inst.beneficiaries,
-            "inspections": inst.inspections,
-            "report_variance": inst.report_variance
-        })
         risk_rec = RiskAnalysisDB(
             id=f"RISK-{inst.id}",
             institution_id=inst.id,
-            anomaly=analysis["anomaly"],
-            anomaly_score=analysis["anomaly_score"],
-            risk_score=analysis["risk_score"],
-            risk_band=analysis["risk_band"],
-            recommendation=analysis["recommendation"],
-            reason=analysis["reason"]
         )
         db.add(risk_rec)
-        db.commit()
-        db.refresh(risk_rec)
+
+    risk_rec.anomaly = analysis["anomaly"]
+    risk_rec.anomaly_score = analysis["anomaly_score"]
+    risk_rec.risk_score = analysis["risk_score"]
+    risk_rec.risk_band = analysis["risk_band"]
+    risk_rec.ghost_beneficiary_score = analysis.get("ghost_beneficiary_score", 0.0)
+    risk_rec.recommendation = analysis["recommendation"]
+    risk_rec.reason = analysis["reason"]
+    risk_rec.factors = analysis.get("factors", [])
+    risk_rec.peer_deviation_score = analysis.get("peer_deviation_score", 0.0)
+    risk_rec.model_name = analysis.get("model_name")
+    risk_rec.model_version = analysis.get("model_version")
+    risk_rec.model_status = analysis.get("model_status")
+    risk_rec.reference_population_size = analysis.get("reference_population_size", 0)
+    risk_rec.reference_scope = reference_scope
+    risk_rec.analyzed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(risk_rec)
 
     return {
         "id": inst.id,
@@ -179,6 +202,12 @@ def get_institution_with_risk(inst: InstitutionDB, db: Session) -> Dict[str, Any
         "recommendation": risk_rec.recommendation,
         "reason": risk_rec.reason,
         "factors": getattr(risk_rec, "factors", []),
+        "peer_deviation_score": getattr(risk_rec, "peer_deviation_score", 0.0),
+        "model_name": getattr(risk_rec, "model_name", None),
+        "model_version": getattr(risk_rec, "model_version", None),
+        "model_status": getattr(risk_rec, "model_status", None),
+        "reference_population_size": getattr(risk_rec, "reference_population_size", 0),
+        "reference_scope": getattr(risk_rec, "reference_scope", None),
         "analyzed_at": risk_rec.analyzed_at.isoformat() if risk_rec.analyzed_at else None
     }
 
@@ -284,24 +313,17 @@ def create_institution(
     db.add(inst)
     db.commit()
     db.refresh(inst)
+    record_snapshot(db, inst, source="INSTITUTION_CREATED")
 
-    analysis = analyze_institution({
-        "attendance": inst.attendance,
-        "beneficiaries": inst.beneficiaries,
-        "inspections": inst.inspections,
-        "report_variance": inst.report_variance
-    })
-    risk_rec = RiskAnalysisDB(
-        id=f"RISK-{inst.id}",
-        institution_id=inst.id,
-        anomaly=analysis["anomaly"],
-        anomaly_score=analysis["anomaly_score"],
-        risk_score=analysis["risk_score"],
-        risk_band=analysis["risk_band"],
-        recommendation=analysis["recommendation"],
-        reason=analysis["reason"]
-    )
-    db.add(risk_rec)
+    analysis_view = get_institution_with_risk(inst, db)
+    analysis = {
+        "anomaly": analysis_view["anomaly"],
+        "risk_score": analysis_view["risk_score"],
+        "risk_band": analysis_view["risk_band"],
+        "recommendation": analysis_view["recommendation"],
+        "reason": analysis_view["reason"],
+        "factors": analysis_view["factors"],
+    }
 
     if analysis["risk_score"] >= 61 or analysis["anomaly"]:
         alert = AlertDB(
@@ -357,39 +379,10 @@ def update_institution(
     
     db.commit()
     db.refresh(inst)
+    record_snapshot(db, inst, source="INSTITUTION_UPDATED")
 
-    # Re-run AI analysis
-    analysis = analyze_institution({
-        "attendance": inst.attendance,
-        "beneficiaries": inst.beneficiaries,
-        "inspections": inst.inspections,
-        "report_variance": inst.report_variance
-    })
-    risk_rec = db.query(RiskAnalysisDB).filter(RiskAnalysisDB.institution_id == id).first()
-    if risk_rec:
-        risk_rec.anomaly = analysis["anomaly"]
-        risk_rec.anomaly_score = analysis["anomaly_score"]
-        risk_rec.risk_score = analysis["risk_score"]
-        risk_rec.risk_band = analysis["risk_band"]
-        risk_rec.recommendation = analysis["recommendation"]
-        risk_rec.reason = analysis["reason"]
-        risk_rec.analyzed_at = datetime.now(timezone.utc)
-    else:
-        risk_rec = RiskAnalysisDB(
-            id=f"RISK-{inst.id}",
-            institution_id=inst.id,
-            anomaly=analysis["anomaly"],
-            anomaly_score=analysis["anomaly_score"],
-            risk_score=analysis["risk_score"],
-            risk_band=analysis["risk_band"],
-            recommendation=analysis["recommendation"],
-            reason=analysis["reason"]
-        )
-        db.add(risk_rec)
-    db.commit()
-
+    # Re-run database-backed AI analysis after persisting the new snapshot.
     return get_institution_with_risk(inst, db)
-
 @app.delete("/api/institutions/{id}")
 def delete_institution(
     id: str,
@@ -413,28 +406,75 @@ def analyze_ai_endpoint(
     institution_id = req.get("institution_id")
     if institution_id:
         inst = db.query(InstitutionDB).filter(InstitutionDB.id == institution_id).first()
-        if inst:
-            req = {
-                "attendance": inst.attendance,
-                "beneficiaries": inst.beneficiaries,
-                "inspections": inst.inspections,
-                "report_variance": inst.report_variance
-            }
-            analysis = analyze_institution(req)
-            risk_rec = db.query(RiskAnalysisDB).filter(RiskAnalysisDB.institution_id == institution_id).first()
-            if risk_rec:
-                risk_rec.anomaly = analysis["anomaly"]
-                risk_rec.anomaly_score = analysis["anomaly_score"]
-                risk_rec.risk_score = analysis["risk_score"]
-                risk_rec.risk_band = analysis["risk_band"]
-                risk_rec.recommendation = analysis["recommendation"]
-                risk_rec.reason = analysis["reason"]
-                risk_rec.analyzed_at = datetime.now(timezone.utc)
-                db.commit()
-            return {**analysis, "institution_id": institution_id, "analyzed_at": datetime.now(timezone.utc).isoformat()}
+        if not inst:
+            raise HTTPException(status_code=404, detail="Institution not found")
+        return get_institution_with_risk(inst, db)
 
     analysis = analyze_institution(req)
     return {**analysis, "analyzed_at": datetime.now(timezone.utc).isoformat()}
+
+
+@app.post("/api/ai/history")
+def record_ai_history(
+    req: AIHistoryRecordRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    inst = db.query(InstitutionDB).filter(
+        InstitutionDB.id == req.institution_id,
+        InstitutionDB.status == "active",
+    ).first()
+    if not inst:
+        raise HTTPException(status_code=404, detail="Institution not found")
+
+    if req.cctv_headcount is not None and req.cctv_headcount < 0:
+        raise HTTPException(status_code=400, detail="cctv_headcount cannot be negative")
+
+    row = record_snapshot(
+        db,
+        inst,
+        source=req.source.strip().upper()[:32] or "API",
+        cctv_headcount=req.cctv_headcount,
+    )
+    analysis = get_institution_with_risk(inst, db)
+
+    return {
+        "history_id": row.id,
+        "institution_id": inst.id,
+        "recorded_at": row.recorded_at.isoformat() if row.recorded_at else None,
+        "source": row.source,
+        "reference_population_size": analysis["reference_population_size"],
+        "model_status": analysis["model_status"],
+        "risk_score": analysis["risk_score"],
+    }
+
+
+@app.get("/api/ai/history/{institution_id}")
+def get_ai_history(
+    institution_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    rows = db.query(InstitutionMetricDB).filter(
+        InstitutionMetricDB.institution_id == institution_id
+    ).order_by(InstitutionMetricDB.recorded_at.desc()).limit(100).all()
+
+    return [
+        {
+            "id": row.id,
+            "institution_id": row.institution_id,
+            "scheme": row.scheme,
+            "attendance": row.attendance,
+            "beneficiaries": row.beneficiaries,
+            "inspections": row.inspections,
+            "report_variance": row.report_variance,
+            "sanctioned_capacity": row.sanctioned_capacity,
+            "cctv_headcount": row.cctv_headcount,
+            "source": row.source,
+            "recorded_at": row.recorded_at.isoformat() if row.recorded_at else None,
+        }
+        for row in rows
+    ]
 
 # Inspections
 @app.get("/api/inspections")
@@ -1112,10 +1152,40 @@ def submit_biometric_punch(
         inst.attendance = round((req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1)
         inst.beneficiaries = req.beneficiaries_total
 
-    db.commit()
+@app.post("/api/biometric/punch")
+def submit_biometric_punch(
+    req: BiometricPunchCreate,
+    current_user: UserDB = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    inst = db.query(InstitutionDB).filter(InstitutionDB.id == req.institution_id).first()
+    if not inst:
+        raise HTTPException(status_code=404, detail="Institution not found")
 
-    return {
-        "status": "SUBMITTED",
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cctv_est = req.cctv_estimated_headcount or int(req.beneficiaries_present * 0.85)
+    variance_flag = abs(req.beneficiaries_present - cctv_est) > (req.beneficiaries_total * 0.20)
+
+    punch = BiometricPunchDB(
+        id=f"PUNCH-{uuid.uuid4().hex[:8]}",
+        institution_id=req.institution_id,
+        date=today_str,
+        shift=req.shift,
+        staff_present=req.staff_present,
+        staff_total=req.staff_total,
+        beneficiaries_present=req.beneficiaries_present,
+        beneficiaries_total=req.beneficiaries_total,
+        cctv_estimated_headcount=cctv_est,
+        variance_flag=variance_flag,
+        uploaded_at=datetime.now(timezone.utc)
+    )
+    db.add(punch)
+
+    # Update institution attendance percentage
+    if req.beneficiaries_total > 0:
+        inst.attendance = round((req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1)
+        inst.beneficiaries = req.beneficiaries_total
+
         "punch_id": punch.id,
         "date": today_str,
         "shift": req.shift,
