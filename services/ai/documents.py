@@ -79,7 +79,7 @@ def extract_fields(text: str) -> dict[str, Any]:
         "institution_id": r"(?:institution|inst)[ ]*(?:id|no|number)?[ ]*[:#_-]?[ ]*([A-Z]{2,8}-[0-9]{3,8})(?:[^A-Z0-9]|$)",
         "attendance_rate": r"attendance(?:[ ]+rate)?[ ]*[:=-][ ]*([0-9]{1,3}(?:[.][0-9]+)?)[ ]*%",
         "beneficiary_count": r"beneficiar(?:y|ies)[ ]*(?:count|total)?[ ]*[:=-][ ]*([0-9]{1,6})(?:[^0-9]|$)",
-        "grant_amount": r"(?:grant|fund|sanctioned[ ]+amount)[ ]*[:=-][ ]*(?:INR|Rs[.]?)?[ ]*([0-9,]+(?:[.][0-9]+)?)",
+        "grant_amount": r"(?:grant(?:[ ]+amount)?|fund|sanctioned[ ]+amount)[ ]*[:=-][ ]*(?:INR|Rs[.]?)?[ ]*([0-9,]+(?:[.][0-9]+)?)",
         "reference_number": r"(?:reference|ref|file)[ ]*(?:no|number)?[ ]*[:=-][ ]*([A-Z0-9/_-]{4,40})(?:[^A-Z0-9/_-]|$)",
         "report_date": r"(?:report[ ]+date|date)[ ]*[:=-][ ]*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})(?:[^0-9/-]|$)",
     }
