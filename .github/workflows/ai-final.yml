@@ -36,6 +36,7 @@ jobs:
           pytest -q tests/test_document_intelligence.py
           pytest -q tests/test_assignment_optimizer.py
           pytest -q tests/test_mlops.py
+          pytest -q tests/test_mlops_api.py
 
       - name: Run API regression suite
         env:
