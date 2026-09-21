@@ -97,6 +97,7 @@ def record_snapshot(
     row = InstitutionMetricDB(
         institution_id=institution.id,
         scheme=institution.scheme,
+        district=institution.district,
         attendance=float(institution.attendance),
         beneficiaries=int(institution.beneficiaries),
         inspections=int(institution.inspections),

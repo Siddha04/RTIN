@@ -46,6 +46,7 @@ class InstitutionMetricDB(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     institution_id = Column(String, nullable=False, index=True)
     scheme = Column(String, nullable=False, index=True)
+    district = Column(String, nullable=True, index=True)
     attendance = Column(Float, nullable=False, default=0.0)
     beneficiaries = Column(Integer, nullable=False, default=0)
     inspections = Column(Integer, nullable=False, default=0)
@@ -56,6 +57,22 @@ class InstitutionMetricDB(Base):
     source = Column(String, nullable=False, default="SYSTEM")
     recorded_at = Column(DateTime(timezone=True), default=utc_now, index=True)
     created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class ExternalDataObservationDB(Base):
+    __tablename__ = "external_data_observations"
+
+    id = Column(String, primary_key=True, index=True)
+    source = Column(String, nullable=False, index=True)
+    dataset = Column(String, nullable=False, index=True)
+    scope = Column(String, nullable=False, default="real_time")
+    district = Column(String, nullable=True, index=True)
+    observed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    source_updated_at = Column(DateTime(timezone=True), nullable=True)
+    payload = Column(JSON, nullable=False)
+    payload_hash = Column(String, nullable=False, index=True)
+    fetched_at = Column(DateTime(timezone=True), default=utc_now, index=True)
+    status = Column(String, nullable=False, default="INGESTED")
 
 
 class InspectionDB(Base):

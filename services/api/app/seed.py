@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from services.api.app.database import engine, Base, SessionLocal
 from services.api.app.models import (
-    UserDB, InstitutionDB, InstitutionMetricDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
+    UserDB, InstitutionDB, InstitutionMetricDB, ExternalDataObservationDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
     CCTVFeedDB, VCSessionDB, BeneficiaryDB, BiometricPunchDB, ComplianceNoticeDB, AtrReportDB
 )
 from services.api.app.auth import hash_password
@@ -54,8 +54,10 @@ def migrate_schema_if_needed():
                     "reference_scope": "VARCHAR",
                 },
                 "institution_metrics": {
+                    "district": "VARCHAR",
                     "outcome_label": "INTEGER",
                 },
+                "external_data_observations": {},
             }
 
             for table_name, definitions in column_definitions.items():
@@ -130,11 +132,17 @@ def migrate_schema_if_needed():
                     conn.execute(text("ALTER TABLE inspections ADD COLUMN scheme_name VARCHAR;"))
                 conn.commit()
 
+            # External data observations are created by Base.metadata.create_all.
+            # They do not require ALTER TABLE because this table is introduced as part of Phase 7.
+
             # Check institution_metrics columns
             res = conn.execute(text("PRAGMA table_info(institution_metrics);"))
             cols = [row[1] for row in res.fetchall()]
-            if cols and "outcome_label" not in cols:
-                conn.execute(text("ALTER TABLE institution_metrics ADD COLUMN outcome_label INTEGER;"))
+            if cols:
+                if "district" not in cols:
+                    conn.execute(text("ALTER TABLE institution_metrics ADD COLUMN district VARCHAR;"))
+                if "outcome_label" not in cols:
+                    conn.execute(text("ALTER TABLE institution_metrics ADD COLUMN outcome_label INTEGER;"))
                 conn.commit()
 
             # Check risk_analyses columns
