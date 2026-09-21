@@ -40,6 +40,23 @@ class InstitutionDB(Base):
     status = Column(String, default="active")
     created_at = Column(DateTime(timezone=True), default=utc_now)
 
+class InstitutionMetricDB(Base):
+    __tablename__ = "institution_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    institution_id = Column(String, nullable=False, index=True)
+    scheme = Column(String, nullable=False, index=True)
+    attendance = Column(Float, nullable=False, default=0.0)
+    beneficiaries = Column(Integer, nullable=False, default=0)
+    inspections = Column(Integer, nullable=False, default=0)
+    report_variance = Column(Float, nullable=False, default=0.0)
+    sanctioned_capacity = Column(Integer, nullable=False, default=0)
+    cctv_headcount = Column(Integer, nullable=True)
+    source = Column(String, nullable=False, default="SYSTEM")
+    recorded_at = Column(DateTime(timezone=True), default=utc_now, index=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
 class InspectionDB(Base):
     __tablename__ = "inspections"
 
