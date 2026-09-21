@@ -46,6 +46,7 @@ class InstitutionMetricDB(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     institution_id = Column(String, nullable=False, index=True)
     scheme = Column(String, nullable=False, index=True)
+    district = Column(String, nullable=True, index=True)
     attendance = Column(Float, nullable=False, default=0.0)
     beneficiaries = Column(Integer, nullable=False, default=0)
     inspections = Column(Integer, nullable=False, default=0)
