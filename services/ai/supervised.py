@@ -20,8 +20,16 @@ def train_xgboost_model(
         raise ValueError("records and labels must have the same length")
     if len(records) < 20:
         raise ValueError("at least 20 labeled observations are required")
-    if len(set(int(value) for value in labels)) < 2:
-        raise ValueError("both risk outcome classes are required")
+
+    normalized_labels = [int(value) for value in labels]
+    class_counts = {
+        label: normalized_labels.count(label)
+        for label in set(normalized_labels)
+    }
+    if set(class_counts) != {0, 1}:
+        raise ValueError("both binary risk outcome classes 0 and 1 are required")
+    if min(class_counts.values()) < 2:
+        raise ValueError("each risk outcome class needs at least 2 observations")
 
     try:
         from sklearn.metrics import accuracy_score, roc_auc_score
@@ -33,7 +41,7 @@ def train_xgboost_model(
         ) from exc
 
     X = np.vstack([extract_features(record) for record in records])
-    y = np.asarray(labels, dtype=int)
+    y = np.asarray(normalized_labels, dtype=int)
 
     X_train, X_test, y_train, y_test = train_test_split(
         X,
