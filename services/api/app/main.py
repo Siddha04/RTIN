@@ -28,6 +28,7 @@ from services.api.app.auth import (
 from services.api.app.seed import seed_database
 from services.ai.anomaly import analyze_institution
 from services.ai.history import build_peer_reference, record_snapshot
+from services.ai.vision import VisionCaptureError, VisionDependencyError, analyze_stream_once
 from services.api.app.cctv import get_institution_feeds, capture_cctv_snapshot
 from services.api.app.vc import pick_random_candidate, initiate_vc_call, finish_vc_call
 from services.api.app.assignment import allocate_inspections, haversine_distance_km
@@ -918,6 +919,10 @@ class CCTVSnapshotReq(BaseModel):
     feed_id: str
     inspection_id: Optional[str] = None
 
+class CCTVAnalyzeRequest(BaseModel):
+    confidence: float = 0.35
+    tracking: bool = True
+
 @app.post("/api/cctv/snapshot")
 def capture_snapshot_endpoint(
     req: CCTVSnapshotReq,
@@ -933,6 +938,63 @@ def capture_snapshot_endpoint(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+class CCTVAnalyzePathRequest(BaseModel):
+    feed_id: str
+
+
+@app.post("/api/cctv/{feed_id}/analyze")
+def analyze_cctv_feed(
+    feed_id: str,
+    req: CCTVAnalyzeRequest,
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+    db: Session = Depends(get_db),
+):
+    feed = db.query(CCTVFeedDB).filter(CCTVFeedDB.id == feed_id).first()
+    if not feed:
+        raise HTTPException(status_code=404, detail="CCTV Feed not found")
+
+    try:
+        result = analyze_stream_once(
+            feed.stream_url,
+            confidence=req.confidence,
+            tracking=req.tracking,
+        )
+    except (VisionDependencyError, VisionCaptureError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    feed.ai_crowd_count = int(result["person_count"])
+    feed.motion_detected = bool(result["person_count"] > 0)
+    feed.last_ping = datetime.now(timezone.utc)
+    db.commit()
+
+    inst = db.query(InstitutionDB).filter(InstitutionDB.id == feed.institution_id).first()
+    risk = None
+    if inst:
+        record_snapshot(
+            db,
+            inst,
+            source="CCTV_AI",
+            cctv_headcount=int(result["person_count"]),
+        )
+        risk = get_institution_with_risk(inst, db)
+
+    return {
+        "feed_id": feed.id,
+        "institution_id": feed.institution_id,
+        "camera_name": feed.camera_name,
+        "person_count": result["person_count"],
+        "tracking_enabled": result["tracking_enabled"],
+        "detections": result["detections"],
+        "capture": result["capture"],
+        "risk": {
+            "risk_score": risk["risk_score"] if risk else None,
+            "risk_band": risk["risk_band"] if risk else None,
+            "model_status": risk["model_status"] if risk else None,
+            "reference_population_size": risk["reference_population_size"] if risk else None,
+        },
+    }
 
 # --------------------------------------------------------------------------
 # Surprise Video Conferencing (VC) API
