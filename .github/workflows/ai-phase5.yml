@@ -1,0 +1,37 @@
+name: INSPECT-AI Phase 5 Verification
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - ml/phase-5-inspection-optimizer
+
+jobs:
+  phase5:
+    name: Risk-aware inspection optimizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r services/api/requirements.txt pytest httpx
+
+      - name: Compile Python
+        run: python -m compileall services/api services/ai
+
+      - name: Run optimizer tests
+        env:
+          PYTHONPATH: .
+        run: pytest -q tests/test_assignment_optimizer.py
+
+      - name: Run AI regression tests
+        env:
+          PYTHONPATH: .
+        run: pytest -q tests/test_ai_engine.py tests/test_ai_history.py tests/test_cctv_vision.py tests/test_document_intelligence.py
