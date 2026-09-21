@@ -503,6 +503,7 @@ def get_ai_history(
             "report_variance": row.report_variance,
             "sanctioned_capacity": row.sanctioned_capacity,
             "cctv_headcount": row.cctv_headcount,
+            "outcome_label": row.outcome_label,
             "source": row.source,
             "recorded_at": row.recorded_at.isoformat() if row.recorded_at else None,
         }
