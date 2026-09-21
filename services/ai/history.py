@@ -34,7 +34,10 @@ def build_peer_reference(
     """
     rows = (
         db.query(InstitutionMetricDB)
-        .filter(InstitutionMetricDB.scheme == institution.scheme)
+        .filter(
+            InstitutionMetricDB.scheme == institution.scheme,
+            InstitutionMetricDB.institution_id != institution.id,
+        )
         .order_by(InstitutionMetricDB.recorded_at.desc())
         .limit(limit)
         .all()
@@ -45,7 +48,10 @@ def build_peer_reference(
     if len(reference) < limit:
         fallback_rows = (
             db.query(InstitutionMetricDB)
-            .filter(InstitutionMetricDB.scheme != institution.scheme)
+            .filter(
+                InstitutionMetricDB.scheme != institution.scheme,
+                InstitutionMetricDB.institution_id != institution.id,
+            )
             .order_by(InstitutionMetricDB.recorded_at.desc())
             .limit(limit - len(reference))
             .all()
