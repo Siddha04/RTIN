@@ -160,6 +160,71 @@ def detect_people(
     return detections
 
 
+
+
+def track_people(
+    frame_bgr: Any,
+    *,
+    model_path: str | None = None,
+    confidence: float = 0.35,
+    tracker: str = "bytetrack.yaml",
+) -> list[Detection]:
+    """Track people with Ultralytics' built-in ByteTrack/BoT-SORT backends."""
+    try:
+        from ultralytics import YOLO
+    except ImportError as exc:
+        raise VisionDependencyError(
+            "Ultralytics is not installed. Install services/api/requirements-vision.txt"
+        ) from exc
+
+    weights = model_path or os.getenv("YOLO_MODEL_PATH")
+    if not weights:
+        raise VisionCaptureError(
+            "YOLO_MODEL_PATH is not configured; provide a real YOLO weights file"
+        )
+
+    model = YOLO(weights)
+    results = model.track(
+        source=frame_bgr,
+        conf=confidence,
+        classes=[0],
+        tracker=tracker,
+        persist=True,
+        verbose=False,
+    )
+
+    detections: list[Detection] = []
+    if not results:
+        return detections
+
+    result = results[0]
+    boxes = getattr(result, "boxes", None)
+    if boxes is None:
+        return detections
+
+    xyxy = boxes.xyxy.cpu().numpy()
+    confs = boxes.conf.cpu().numpy()
+    classes = boxes.cls.cpu().numpy()
+    ids = boxes.id.cpu().numpy().astype(int) if boxes.id is not None else [None] * len(xyxy)
+
+    for coords, score, cls_id, track_id in zip(xyxy, confs, classes, ids):
+        if int(cls_id) != 0:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in coords.tolist()]
+        detections.append(
+            Detection(
+                class_id=0,
+                confidence=float(score),
+                x1=x1,
+                y1=y2 if False else y1,
+                x2=x2,
+                y2=y2,
+                track_id=None if track_id is None else int(track_id),
+            )
+        )
+
+    return detections
+
 def analyze_stream_once(
     source: str,
     *,
