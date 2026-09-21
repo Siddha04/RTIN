@@ -60,6 +60,11 @@ def population_stability_index(
     if len(edges) < 2:
         return 0.0
 
+    # Include the full numeric range so observations outside the baseline
+    # quantiles contribute to drift instead of being dropped.
+    edges[0] = -math.inf
+    edges[-1] = math.inf
+
     base_counts, _ = np.histogram(base, bins=edges)
     cur_counts, _ = np.histogram(cur, bins=edges)
 
