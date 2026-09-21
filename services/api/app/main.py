@@ -29,6 +29,14 @@ from services.api.app.seed import seed_database
 from services.ai.anomaly import analyze_institution
 from services.ai.history import build_peer_reference, record_snapshot
 from services.ai.vision import VisionCaptureError, VisionDependencyError, analyze_stream_once
+from services.ai.documents import (
+    DocumentAnalysisError,
+    DocumentClassifier,
+    DocumentDependencyError,
+    compare_documents,
+    extract_fields,
+    ocr_image,
+)
 from services.api.app.cctv import get_institution_feeds, capture_cctv_snapshot
 from services.api.app.vc import pick_random_candidate, initiate_vc_call, finish_vc_call
 from services.api.app.assignment import allocate_inspections, haversine_distance_km
@@ -1260,6 +1268,56 @@ def get_biometric_history(
     return db.query(BiometricPunchDB).filter(
         BiometricPunchDB.institution_id == institution_id
     ).order_by(BiometricPunchDB.uploaded_at.desc()).limit(15).all()
+
+
+# --------------------------------------------------------------------------
+# Document Intelligence API
+# --------------------------------------------------------------------------
+
+@app.post("/api/documents/analyze")
+async def analyze_document_endpoint(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Document file is empty")
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Document exceeds 10 MB limit")
+
+    try:
+        ocr = ocr_image(content)
+    except (DocumentDependencyError, DocumentAnalysisError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    fields = extract_fields(ocr.text)
+    classifier = DocumentClassifier()
+    classification = classifier.predict(ocr.text)
+
+    return {
+        "filename": file.filename,
+        "mime_type": file.content_type,
+        "ocr": {
+            "provider": ocr.provider,
+            "confidence": ocr.confidence,
+            "text": ocr.text,
+        },
+        "extracted_fields": fields,
+        "classification": classification,
+        "status": "ANALYZED",
+    }
+
+
+@app.post("/api/documents/compare")
+def compare_document_endpoint(
+    documents: List[Dict[str, Any]],
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    if not documents:
+        raise HTTPException(status_code=400, detail="At least one document record is required")
+    return compare_documents(documents)
+
 
 # --------------------------------------------------------------------------
 # Structured Inspection Audit Certificate Report API
