@@ -46,10 +46,13 @@ def allocate_inspections(
     risk_records = db.query(RiskAnalysisDB).all()
     risk_by_institution = {str(row.institution_id): row for row in risk_records}
 
+    # Rank the full candidate pool first. Eligibility constraints such as
+    # cooling periods can remove high-risk targets; assigning only the top-N
+    # before applying constraints could otherwise return zero assignments.
     targets = select_targets(
         institutions=institutions,
         risk_by_institution=risk_by_institution,
-        target_count=target_count,
+        target_count=len(institutions),
     )
 
     cutoff_date = utc_now() - timedelta(days=180)
@@ -63,6 +66,7 @@ def allocate_inspections(
     }
 
     selections = assign_targets(targets, inspectors, recent_pairings)
+    selections = selections[:target_count]
     scheduled_time = utc_now() + timedelta(hours=4)
     sealed_time = scheduled_time - timedelta(hours=seal_hours)
 
