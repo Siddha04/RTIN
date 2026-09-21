@@ -29,7 +29,7 @@ jobs:
       - name: Run online-data tests
         env:
           PYTHONPATH: .
-        run: pytest -q tests/test_online_data.py tests/test_ai_history.py
+        run: pytest -q tests/test_online_data.py tests/test_ai_history.py tests/test_enriched_training.py
 
       - name: Verify no dataset files are tracked
         shell: bash
