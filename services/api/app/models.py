@@ -123,6 +123,12 @@ class RiskAnalysisDB(Base):
     recommendation = Column(String, nullable=False)
     reason = Column(String, nullable=False)
     factors = Column(JSON, nullable=True)
+    peer_deviation_score = Column(Float, default=0.0)
+    model_name = Column(String, nullable=True)
+    model_version = Column(String, nullable=True)
+    model_status = Column(String, nullable=True)
+    reference_population_size = Column(Integer, default=0)
+    reference_scope = Column(String, nullable=True)
     analyzed_at = Column(DateTime(timezone=True), default=utc_now)
 
 class CCTVFeedDB(Base):
