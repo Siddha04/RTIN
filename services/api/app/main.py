@@ -324,17 +324,6 @@ def create_institution(
         "reason": analysis_view["reason"],
         "factors": analysis_view["factors"],
     }
-    risk_rec = RiskAnalysisDB(
-        id=f"RISK-{inst.id}",
-        institution_id=inst.id,
-        anomaly=analysis["anomaly"],
-        anomaly_score=analysis["anomaly_score"],
-        risk_score=analysis["risk_score"],
-        risk_band=analysis["risk_band"],
-        recommendation=analysis["recommendation"],
-        reason=analysis["reason"]
-    )
-    db.add(risk_rec)
 
     if analysis["risk_score"] >= 61 or analysis["anomaly"]:
         alert = AlertDB(
