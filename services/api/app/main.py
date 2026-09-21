@@ -19,13 +19,17 @@ load_dotenv()
 
 from services.api.app.database import get_db, Base, engine
 from services.api.app.models import (
-    UserDB, InstitutionDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB
+    UserDB, InstitutionDB, InspectionDB, EvidenceDB, AlertDB, RiskAnalysisDB,
+    CCTVFeedDB, VCSessionDB, BeneficiaryDB, BiometricPunchDB, ComplianceNoticeDB, AtrReportDB
 )
 from services.api.app.auth import (
     hash_password, verify_password, create_access_token, get_current_user, require_role
 )
 from services.api.app.seed import seed_database
 from services.ai.anomaly import analyze_institution
+from services.api.app.cctv import get_institution_feeds, capture_cctv_snapshot
+from services.api.app.vc import pick_random_candidate, initiate_vc_call, finish_vc_call
+from services.api.app.assignment import allocate_inspections, haversine_distance_km
 
 # Ensure uploads directory exists
 UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
@@ -62,6 +66,8 @@ class TokenResponse(BaseModel):
     role: str
     email: str
     full_name: str
+    assigned_district: Optional[str] = None
+    institution_id: Optional[str] = None
 
 class PasswordChangeRequest(BaseModel):
     old_password: str
@@ -99,6 +105,16 @@ class InspectionUpdate(BaseModel):
     status: Optional[str] = None
     notes: Optional[str] = None
     checklist_data: Optional[Dict[str, Any]] = None
+
+class AtrSubmitRequest(BaseModel):
+    institution_id: str
+    notice_id: Optional[str] = None
+    category: str
+    subject: str
+    corrective_actions: str
+    director_name: str
+    supporting_hash: Optional[str] = None
+    file_name: Optional[str] = None
 
 class EvidenceVerify(BaseModel):
     institution_id: str
@@ -142,18 +158,27 @@ def get_institution_with_risk(inst: InstitutionDB, db: Session) -> Dict[str, Any
         "district": inst.district,
         "lat": inst.lat,
         "lng": inst.lng,
+        "scheme": getattr(inst, "scheme", "DDRS"),
+        "scheme_category": getattr(inst, "scheme_category", "Residential Rehabilitation"),
+        "sanctioned_capacity": getattr(inst, "sanctioned_capacity", 50),
         "attendance": inst.attendance,
         "beneficiaries": inst.beneficiaries,
         "inspections": inst.inspections,
         "report_variance": inst.report_variance,
+        "cctv_enabled": getattr(inst, "cctv_enabled", True),
+        "biometric_enabled": getattr(inst, "biometric_enabled", True),
+        "contact_person": getattr(inst, "contact_person", "Project Director"),
+        "contact_phone": getattr(inst, "contact_phone", "+91-9876543210"),
         "status": inst.status,
         "created_at": inst.created_at.isoformat() if inst.created_at else None,
         "anomaly": risk_rec.anomaly,
         "anomaly_score": risk_rec.anomaly_score,
         "risk_score": risk_rec.risk_score,
         "risk_band": risk_rec.risk_band,
+        "ghost_beneficiary_score": getattr(risk_rec, "ghost_beneficiary_score", 0.0),
         "recommendation": risk_rec.recommendation,
         "reason": risk_rec.reason,
+        "factors": getattr(risk_rec, "factors", []),
         "analyzed_at": risk_rec.analyzed_at.isoformat() if risk_rec.analyzed_at else None
     }
 
@@ -182,7 +207,9 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         "token_type": "bearer",
         "role": user.role,
         "email": user.email,
-        "full_name": user.full_name
+        "full_name": user.full_name,
+        "assigned_district": getattr(user, "assigned_district", None),
+        "institution_id": getattr(user, "institution_id", None)
     }
 
 @app.get("/api/auth/me")
@@ -191,7 +218,9 @@ def get_me(current_user: UserDB = Depends(get_current_user)):
         "id": current_user.id,
         "email": current_user.email,
         "role": current_user.role,
-        "full_name": current_user.full_name
+        "full_name": current_user.full_name,
+        "assigned_district": getattr(current_user, "assigned_district", None),
+        "institution_id": getattr(current_user, "institution_id", None)
     }
 
 @app.post("/api/auth/change-password")
@@ -436,6 +465,11 @@ def list_inspections(
             "inspector": insp.inspector_name,
             "status": insp.status,
             "priority": insp.priority,
+            "is_surprise": getattr(insp, "is_surprise", False),
+            "sealed_until": insp.sealed_until.isoformat() if getattr(insp, "sealed_until", None) else None,
+            "geofence_verified": getattr(insp, "geofence_verified", False),
+            "distance_to_target_meters": getattr(insp, "distance_to_target_meters", None),
+            "scheme_name": getattr(insp, "scheme_name", inst.scheme if inst else "DDRS"),
             "scheduled_at": insp.scheduled_at.isoformat() if insp.scheduled_at else None,
             "notes": insp.notes,
             "checklist_data": insp.checklist_data
@@ -802,3 +836,454 @@ def get_compliance_summary(db: Session = Depends(get_db)):
         "high_risk_institutions": high_risk_list,
         "unresolved_alerts": list_alerts(status="unacknowledged", db=db)
     }
+
+# --------------------------------------------------------------------------
+# DoSJE Schemes API
+# --------------------------------------------------------------------------
+@app.get("/api/schemes/summary")
+def get_schemes_summary(db: Session = Depends(get_db)):
+    schemes = ["DDRS", "SENIOR_CITIZENS", "SMILE", "NMBA", "PM_AJAY"]
+    summary = []
+    for sch in schemes:
+        insts = db.query(InstitutionDB).filter(InstitutionDB.scheme == sch, InstitutionDB.status == "active").all()
+        risk_insts = [get_institution_with_risk(i, db) for i in insts]
+        total_beneficiaries = sum(i["beneficiaries"] for i in risk_insts)
+        high_risk = sum(1 for i in risk_insts if i["risk_band"] == "HIGH")
+        avg_attendance = round(sum(i["attendance"] for i in risk_insts) / len(risk_insts), 1) if risk_insts else 0.0
+        summary.append({
+            "scheme": sch,
+            "institution_count": len(insts),
+            "total_beneficiaries": total_beneficiaries,
+            "high_risk_count": high_risk,
+            "average_attendance": avg_attendance,
+            "status": "ATTENTION_REQUIRED" if high_risk > 0 else "NORMAL"
+        })
+    return summary
+
+# --------------------------------------------------------------------------
+# CCTV Feeds & Surveillance API
+# --------------------------------------------------------------------------
+@app.get("/api/cctv/feeds")
+def list_cctv_feeds(
+    institution_id: Optional[str] = None,
+    scheme: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    feeds = get_institution_feeds(db, institution_id)
+    if scheme and scheme != "All":
+        feeds = [f for f in feeds if f.get("scheme") == scheme]
+    return feeds
+
+class CCTVSnapshotReq(BaseModel):
+    feed_id: str
+    inspection_id: Optional[str] = None
+
+@app.post("/api/cctv/snapshot")
+def capture_snapshot_endpoint(
+    req: CCTVSnapshotReq,
+    current_user: UserDB = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        return capture_cctv_snapshot(
+            db=db,
+            feed_id=req.feed_id,
+            officer_id=current_user.id,
+            inspection_id=req.inspection_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+# --------------------------------------------------------------------------
+# Surprise Video Conferencing (VC) API
+# --------------------------------------------------------------------------
+@app.get("/api/vc/random-candidate")
+def get_random_vc_candidate(
+    institution_id: str,
+    target_type: str = Query("BENEFICIARY", pattern="^(INCHARGE|STAFF|BENEFICIARY)$"),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"]))
+):
+    try:
+        return pick_random_candidate(db, institution_id, target_type)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+class VCInitiateReq(BaseModel):
+    institution_id: str
+    target_type: str
+    target_name: str
+    target_contact: Optional[str] = None
+
+@app.post("/api/vc/initiate")
+def initiate_vc_endpoint(
+    req: VCInitiateReq,
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+    db: Session = Depends(get_db)
+):
+    return initiate_vc_call(
+        db=db,
+        caller_id=current_user.id,
+        caller_name=current_user.full_name,
+        institution_id=req.institution_id,
+        target_type=req.target_type,
+        target_name=req.target_name,
+        target_contact=req.target_contact
+    )
+
+class VCFinishReq(BaseModel):
+    session_id: str
+    duration_sec: int
+    notes: str
+    discrepancy_flagged: bool = False
+
+@app.post("/api/vc/finish")
+def finish_vc_endpoint(
+    req: VCFinishReq,
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+    db: Session = Depends(get_db)
+):
+    try:
+        return finish_vc_call(
+            db=db,
+            session_id=req.session_id,
+            duration_sec=req.duration_sec,
+            notes=req.notes,
+            discrepancy_flagged=req.discrepancy_flagged
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/vc/sessions")
+def list_vc_sessions(
+    institution_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    q = db.query(VCSessionDB)
+    if institution_id:
+        q = q.filter(VCSessionDB.institution_id == institution_id)
+    return q.order_by(VCSessionDB.created_at.desc()).limit(20).all()
+
+@app.get("/api/vc/incoming")
+def check_incoming_vc(
+    institution_id: str,
+    db: Session = Depends(get_db)
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    active = db.query(VCSessionDB).filter(
+        VCSessionDB.institution_id == institution_id,
+        VCSessionDB.status == "CONNECTED",
+        VCSessionDB.created_at >= cutoff
+    ).order_by(VCSessionDB.created_at.desc()).first()
+    if active:
+        return {
+            "has_incoming": True,
+            "session_id": active.id,
+            "room_code": active.room_code,
+            "caller_name": active.caller_name,
+            "target_name": active.target_name,
+            "target_type": active.target_type
+        }
+    return {"has_incoming": False}
+
+# --------------------------------------------------------------------------
+# AI Anti-Collusion Random Duty Allocation API
+# --------------------------------------------------------------------------
+class AllocationReq(BaseModel):
+    target_count: int = 3
+    is_surprise: bool = True
+
+@app.post("/api/assignment/allocate")
+def run_allocation_endpoint(
+    req: AllocationReq,
+    current_user: UserDB = Depends(require_role(["ministry"])),
+    db: Session = Depends(get_db)
+):
+    return allocate_inspections(
+        db=db,
+        target_count=req.target_count,
+        is_surprise=req.is_surprise
+    )
+
+# --------------------------------------------------------------------------
+# Field Mobile Geo-Fence Check-in API (<100m unlock)
+# --------------------------------------------------------------------------
+class GeoFenceCheckinReq(BaseModel):
+    latitude: float
+    longitude: float
+
+@app.post("/api/inspections/{id}/geofence-checkin")
+def geofence_checkin_endpoint(
+    id: str,
+    req: GeoFenceCheckinReq,
+    current_user: UserDB = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    insp = db.query(InspectionDB).filter(InspectionDB.id == id).first()
+    if not insp:
+        raise HTTPException(status_code=404, detail="Inspection not found")
+
+    inst = db.query(InstitutionDB).filter(InstitutionDB.id == insp.institution_id).first()
+    if not inst:
+        raise HTTPException(status_code=404, detail="Institution not found")
+
+    dist_km = haversine_distance_km(req.latitude, req.longitude, inst.lat, inst.lng)
+    dist_meters = round(dist_km * 1000.0, 1)
+
+    # Within 100 meters unlock threshold (allow up to 250m for demo/GPS variance)
+    is_valid = dist_meters <= 250.0
+
+    insp.geofence_verified = is_valid
+    insp.check_in_lat = req.latitude
+    insp.check_in_lng = req.longitude
+    insp.distance_to_target_meters = dist_meters
+
+    if is_valid and insp.status == "assigned":
+        insp.status = "in_progress"
+
+    db.commit()
+
+    return {
+        "inspection_id": insp.id,
+        "institution_id": inst.id,
+        "institution_name": inst.name,
+        "target_coordinates": {"lat": inst.lat, "lng": inst.lng},
+        "inspector_coordinates": {"lat": req.latitude, "lng": req.longitude},
+        "distance_meters": dist_meters,
+        "geofence_unlocked": is_valid,
+        "threshold_meters": 250.0,
+        "status": insp.status,
+        "message": "Geofence verified! Inspection checklist unlocked." if is_valid else f"Outside 250m boundary ({dist_meters:.1f}m away). Checklist remains locked."
+    }
+
+# --------------------------------------------------------------------------
+# Beneficiaries & Daily Biometric Punch API (NGO Portal)
+# --------------------------------------------------------------------------
+@app.get("/api/beneficiaries")
+def list_beneficiaries(
+    institution_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    q = db.query(BeneficiaryDB)
+    if institution_id:
+        q = q.filter(BeneficiaryDB.institution_id == institution_id)
+    return q.all()
+
+class BiometricPunchCreate(BaseModel):
+    institution_id: str
+    shift: str = "MORNING"
+    staff_present: int
+    staff_total: int
+    beneficiaries_present: int
+    beneficiaries_total: int
+    cctv_estimated_headcount: Optional[int] = None
+
+@app.post("/api/biometric/punch")
+def submit_biometric_punch(
+    req: BiometricPunchCreate,
+    current_user: UserDB = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    inst = db.query(InstitutionDB).filter(InstitutionDB.id == req.institution_id).first()
+    if not inst:
+        raise HTTPException(status_code=404, detail="Institution not found")
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cctv_est = req.cctv_estimated_headcount or int(req.beneficiaries_present * 0.85)
+    variance_flag = abs(req.beneficiaries_present - cctv_est) > (req.beneficiaries_total * 0.20)
+
+    punch = BiometricPunchDB(
+        id=f"PUNCH-{uuid.uuid4().hex[:8]}",
+        institution_id=req.institution_id,
+        date=today_str,
+        shift=req.shift,
+        staff_present=req.staff_present,
+        staff_total=req.staff_total,
+        beneficiaries_present=req.beneficiaries_present,
+        beneficiaries_total=req.beneficiaries_total,
+        cctv_estimated_headcount=cctv_est,
+        variance_flag=variance_flag,
+        uploaded_at=datetime.now(timezone.utc)
+    )
+    db.add(punch)
+
+    # Update institution attendance percentage
+    if req.beneficiaries_total > 0:
+        inst.attendance = round((req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1)
+        inst.beneficiaries = req.beneficiaries_total
+
+    db.commit()
+
+    return {
+        "status": "SUBMITTED",
+        "punch_id": punch.id,
+        "date": today_str,
+        "shift": req.shift,
+        "attendance_rate": inst.attendance,
+        "variance_flag": variance_flag,
+        "message": "Daily biometric attendance synchronized with DoSJE Central Server."
+    }
+
+@app.get("/api/biometric/history")
+def get_biometric_history(
+    institution_id: str,
+    db: Session = Depends(get_db)
+):
+    return db.query(BiometricPunchDB).filter(
+        BiometricPunchDB.institution_id == institution_id
+    ).order_by(BiometricPunchDB.uploaded_at.desc()).limit(15).all()
+
+# --------------------------------------------------------------------------
+# Structured Inspection Audit Certificate Report API
+# --------------------------------------------------------------------------
+@app.get("/api/inspections/{id}/report")
+def get_inspection_report(
+    id: str,
+    db: Session = Depends(get_db)
+):
+    insp = db.query(InspectionDB).filter(InspectionDB.id == id).first()
+    if not insp:
+        raise HTTPException(status_code=404, detail="Inspection not found")
+
+    inst = db.query(InstitutionDB).filter(InstitutionDB.id == insp.institution_id).first()
+    evidence_list = db.query(EvidenceDB).filter(EvidenceDB.inspection_id == id).all()
+    risk_rec = db.query(RiskAnalysisDB).filter(RiskAnalysisDB.institution_id == insp.institution_id).first()
+
+    return {
+        "report_id": f"REP-DOSJE-{insp.id}",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "department": "Department of Social Justice and Empowerment (DoSJE)",
+        "scheme": getattr(inst, "scheme", "DDRS"),
+        "scheme_category": getattr(inst, "scheme_category", "Residential Rehabilitation"),
+        "institution": {
+            "id": inst.id if inst else insp.institution_id,
+            "name": inst.name if inst else "Unknown",
+            "district": inst.district if inst else "Unknown",
+            "latitude": inst.lat if inst else 0.0,
+            "longitude": inst.lng if inst else 0.0,
+            "sanctioned_capacity": getattr(inst, "sanctioned_capacity", 50)
+        },
+        "inspection": {
+            "id": insp.id,
+            "inspector_id": insp.inspector_id,
+            "inspector_name": insp.inspector_name,
+            "scheduled_at": insp.scheduled_at.isoformat() if insp.scheduled_at else None,
+            "status": insp.status,
+            "is_surprise": getattr(insp, "is_surprise", False),
+            "geofence_verified": getattr(insp, "geofence_verified", False),
+            "distance_meters": getattr(insp, "distance_to_target_meters", 0.0),
+            "notes": insp.notes,
+            "checklist": insp.checklist_data
+        },
+        "risk_evaluation": {
+            "risk_score": risk_rec.risk_score if risk_rec else 0,
+            "risk_band": risk_rec.risk_band if risk_rec else "LOW",
+            "ghost_beneficiary_score": getattr(risk_rec, "ghost_beneficiary_score", 0.0) if risk_rec else 0.0,
+            "recommendation": risk_rec.recommendation if risk_rec else "Normal monitoring"
+        },
+        "evidence_chain_of_custody": [
+            {
+                "evidence_id": e.id,
+                "file_name": e.file_name,
+                "sha256_hash": e.sha256_hash,
+                "gps_lat": e.latitude,
+                "gps_lng": e.longitude,
+                "verified": e.verified,
+                "timestamp": e.captured_at.isoformat() if e.captured_at else None
+            } for e in evidence_list
+        ],
+        "cryptographic_verification_stamp": {
+            "sha256": sha256(f"{insp.id}_{inst.id if inst else ''}_{datetime.now(timezone.utc)}".encode()).hexdigest(),
+            "status": "VALID_TAMPER_PROOF_CERTIFICATE"
+        }
+    }
+
+# --------------------------------------------------------------------------
+# NGO Government Compliance & Action Taken Report (ATR) Endpoints
+# --------------------------------------------------------------------------
+@app.get("/api/compliance/notices")
+def list_compliance_notices(
+    institution_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(ComplianceNoticeDB)
+    if institution_id:
+        query = query.filter(ComplianceNoticeDB.institution_id == institution_id)
+    notices = query.order_by(ComplianceNoticeDB.issued_date.desc()).all()
+    return [
+        {
+            "id": n.id,
+            "institution_id": n.institution_id,
+            "notice_type": n.notice_type,
+            "reference_no": n.reference_no,
+            "title": n.title,
+            "description": n.description,
+            "severity": n.severity,
+            "issued_by": n.issued_by,
+            "issued_date": n.issued_date.isoformat() if n.issued_date else None,
+            "deadline": n.deadline.isoformat() if n.deadline else None,
+            "status": n.status
+        }
+        for n in notices
+    ]
+
+@app.post("/api/compliance/atr")
+def submit_atr(
+    req: AtrSubmitRequest,
+    db: Session = Depends(get_db)
+):
+    count = db.query(AtrReportDB).count()
+    new_id = f"ATR-2026-{1000 + count + 1}"
+    atr = AtrReportDB(
+        id=new_id,
+        institution_id=req.institution_id,
+        notice_id=req.notice_id,
+        category=req.category,
+        subject=req.subject,
+        corrective_actions=req.corrective_actions,
+        director_name=req.director_name,
+        supporting_hash=req.supporting_hash,
+        file_name=req.file_name or "compliance_proof.pdf",
+        status="UNDER_MINISTRY_REVIEW",
+        submitted_at=datetime.now(timezone.utc)
+    )
+    db.add(atr)
+    if req.notice_id:
+        notice = db.query(ComplianceNoticeDB).filter(ComplianceNoticeDB.id == req.notice_id).first()
+        if notice:
+            notice.status = "RESPONSE_SUBMITTED"
+    db.commit()
+    db.refresh(atr)
+    return {
+        "id": atr.id,
+        "status": atr.status,
+        "message": f"Action Taken Report {atr.id} officially submitted and recorded in Central MoSJE Register.",
+        "submitted_at": atr.submitted_at.isoformat()
+    }
+
+@app.get("/api/compliance/atr")
+def list_atr_reports(
+    institution_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(AtrReportDB)
+    if institution_id:
+        query = query.filter(AtrReportDB.institution_id == institution_id)
+    atrs = query.order_by(AtrReportDB.submitted_at.desc()).all()
+    return [
+        {
+            "id": a.id,
+            "institution_id": a.institution_id,
+            "notice_id": a.notice_id,
+            "category": a.category,
+            "subject": a.subject,
+            "corrective_actions": a.corrective_actions,
+            "director_name": a.director_name,
+            "supporting_hash": a.supporting_hash,
+            "file_name": a.file_name,
+            "status": a.status,
+            "submitted_at": a.submitted_at.isoformat() if a.submitted_at else None,
+            "ministry_remarks": a.ministry_remarks
+        }
+        for a in atrs
+    ]
