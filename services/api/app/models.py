@@ -52,6 +52,7 @@ class InstitutionMetricDB(Base):
     report_variance = Column(Float, nullable=False, default=0.0)
     sanctioned_capacity = Column(Integer, nullable=False, default=0)
     cctv_headcount = Column(Integer, nullable=True)
+    outcome_label = Column(Integer, nullable=True)  # 0 = no confirmed issue, 1 = confirmed issue
     source = Column(String, nullable=False, default="SYSTEM")
     recorded_at = Column(DateTime(timezone=True), default=utc_now, index=True)
     created_at = Column(DateTime(timezone=True), default=utc_now)
