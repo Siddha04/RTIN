@@ -9,3 +9,8 @@ __pycache__/
 *.db
 .DS_Store
 services/api/artifacts/
+
+# External data/model cache should live outside this repository
+rtin-data/
+data/
+datasets/
