@@ -1,3 +1,5 @@
+import os
+os.environ.setdefault("RTIN_ALLOW_DEMO_CCTV", "1")
 import pytest
 from fastapi.testclient import TestClient
 from services.api.app.main import app
