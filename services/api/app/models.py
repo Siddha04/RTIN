@@ -58,6 +58,22 @@ class InstitutionMetricDB(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
+class ExternalDataObservationDB(Base):
+    __tablename__ = "external_data_observations"
+
+    id = Column(String, primary_key=True, index=True)
+    source = Column(String, nullable=False, index=True)
+    dataset = Column(String, nullable=False, index=True)
+    scope = Column(String, nullable=False, default="real_time")
+    district = Column(String, nullable=True, index=True)
+    observed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    source_updated_at = Column(DateTime(timezone=True), nullable=True)
+    payload = Column(JSON, nullable=False)
+    payload_hash = Column(String, nullable=False, index=True)
+    fetched_at = Column(DateTime(timezone=True), default=utc_now, index=True)
+    status = Column(String, nullable=False, default="INGESTED")
+
+
 class InspectionDB(Base):
     __tablename__ = "inspections"
 
