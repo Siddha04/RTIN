@@ -940,10 +940,6 @@ def capture_snapshot_endpoint(
         raise HTTPException(status_code=404, detail=str(e))
 
 
-class CCTVAnalyzePathRequest(BaseModel):
-    feed_id: str
-
-
 @app.post("/api/cctv/{feed_id}/analyze")
 def analyze_cctv_feed(
     feed_id: str,
