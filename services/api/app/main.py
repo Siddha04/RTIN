@@ -382,7 +382,6 @@ def update_institution(
     record_snapshot(db, inst, source="INSTITUTION_UPDATED")
 
     # Re-run database-backed AI analysis after persisting the new snapshot.
-    record_snapshot(db, inst, source="INSTITUTION_UPDATED")
     return get_institution_with_risk(inst, db)
 @app.delete("/api/institutions/{id}")
 def delete_institution(
