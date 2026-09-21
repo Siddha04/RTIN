@@ -69,6 +69,13 @@ def migrate_schema_if_needed():
                     conn.execute(text("ALTER TABLE inspections ADD COLUMN scheme_name VARCHAR;"))
                 conn.commit()
 
+            # Check institution_metrics columns
+            res = conn.execute(text("PRAGMA table_info(institution_metrics);"))
+            cols = [row[1] for row in res.fetchall()]
+            if cols and "outcome_label" not in cols:
+                conn.execute(text("ALTER TABLE institution_metrics ADD COLUMN outcome_label INTEGER;"))
+                conn.commit()
+
             # Check risk_analyses columns
             res = conn.execute(text("PRAGMA table_info(risk_analyses);"))
             cols = [row[1] for row in res.fetchall()]

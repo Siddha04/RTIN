@@ -37,13 +37,19 @@ from services.ai.documents import (
     extract_fields,
     ocr_image,
 )
+from services.ai.mlops import drift_report, latest_model_status
+from services.ai.training import train_from_records
 from services.api.app.cctv import get_institution_feeds, capture_cctv_snapshot
 from services.api.app.vc import pick_random_candidate, initiate_vc_call, finish_vc_call
 from services.api.app.assignment import allocate_inspections, haversine_distance_km
 
 # Ensure uploads directory exists
 UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
+MODEL_ARTIFACT_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "artifacts", "models")
+)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(MODEL_ARTIFACT_DIR, exist_ok=True)
 
 # Seed database on startup
 seed_database()
@@ -139,6 +145,15 @@ class AIHistoryRecordRequest(BaseModel):
     institution_id: str
     source: str = "API"
     cctv_headcount: Optional[int] = None
+    outcome_label: Optional[int] = None
+
+class AITrainingRequest(BaseModel):
+    model_type: str = "isolation_forest"
+
+class AIDriftRequest(BaseModel):
+    baseline: List[Dict[str, Any]]
+    current: List[Dict[str, Any]]
+    threshold: float = 0.20
 
 # --------------------------------------------------------------------------
 # Helper Functions
@@ -438,12 +453,21 @@ def record_ai_history(
 
     if req.cctv_headcount is not None and req.cctv_headcount < 0:
         raise HTTPException(status_code=400, detail="cctv_headcount cannot be negative")
+    if req.outcome_label is not None:
+        if current_user.role not in {"ministry", "inspector"}:
+            raise HTTPException(
+                status_code=403,
+                detail="Only ministry or inspector users can submit confirmed outcome labels",
+            )
+        if req.outcome_label not in {0, 1}:
+            raise HTTPException(status_code=400, detail="outcome_label must be 0 or 1")
 
     row = record_snapshot(
         db,
         inst,
         source=req.source.strip().upper()[:32] or "API",
         cctv_headcount=req.cctv_headcount,
+        outcome_label=req.outcome_label,
     )
     analysis = get_institution_with_risk(inst, db)
 
@@ -479,11 +503,76 @@ def get_ai_history(
             "report_variance": row.report_variance,
             "sanctioned_capacity": row.sanctioned_capacity,
             "cctv_headcount": row.cctv_headcount,
+            "outcome_label": row.outcome_label,
             "source": row.source,
             "recorded_at": row.recorded_at.isoformat() if row.recorded_at else None,
         }
         for row in rows
     ]
+
+
+@app.get("/api/ai/model/status")
+def get_ai_model_status(
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    return latest_model_status(MODEL_ARTIFACT_DIR)
+
+
+@app.post("/api/ai/train")
+def train_ai_model(
+    req: AITrainingRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry"])),
+):
+    rows = db.query(InstitutionMetricDB).order_by(
+        InstitutionMetricDB.recorded_at.asc()
+    ).all()
+
+    records = [
+        {
+            "attendance": row.attendance,
+            "beneficiaries": row.beneficiaries,
+            "inspections": row.inspections,
+            "report_variance": row.report_variance,
+            "sanctioned_capacity": row.sanctioned_capacity,
+            "outcome_label": row.outcome_label,
+        }
+        for row in rows
+    ]
+
+    try:
+        result = train_from_records(
+            records,
+            MODEL_ARTIFACT_DIR,
+            req.model_type,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "status": "TRAINED",
+        "model": req.model_type,
+        "artifact": result,
+    }
+
+
+@app.post("/api/ai/monitor/drift")
+def monitor_ai_drift(
+    req: AIDriftRequest,
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    try:
+        from services.ai.features import FEATURE_NAMES, extract_features
+        return drift_report(
+            req.baseline,
+            req.current,
+            FEATURE_NAMES,
+            extract_features,
+            threshold=req.threshold,
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 # Inspections
 @app.get("/api/inspections")
