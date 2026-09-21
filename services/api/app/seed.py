@@ -54,6 +54,7 @@ def migrate_schema_if_needed():
                     "reference_scope": "VARCHAR",
                 },
                 "institution_metrics": {
+                    "district": "VARCHAR",
                     "outcome_label": "INTEGER",
                 },
                 "external_data_observations": {},
@@ -137,8 +138,11 @@ def migrate_schema_if_needed():
             # Check institution_metrics columns
             res = conn.execute(text("PRAGMA table_info(institution_metrics);"))
             cols = [row[1] for row in res.fetchall()]
-            if cols and "outcome_label" not in cols:
-                conn.execute(text("ALTER TABLE institution_metrics ADD COLUMN outcome_label INTEGER;"))
+            if cols:
+                if "district" not in cols:
+                    conn.execute(text("ALTER TABLE institution_metrics ADD COLUMN district VARCHAR;"))
+                if "outcome_label" not in cols:
+                    conn.execute(text("ALTER TABLE institution_metrics ADD COLUMN outcome_label INTEGER;"))
                 conn.commit()
 
             # Check risk_analyses columns
