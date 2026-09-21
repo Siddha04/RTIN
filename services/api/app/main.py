@@ -39,6 +39,13 @@ from services.ai.documents import (
 )
 from services.ai.mlops import drift_report, latest_model_status
 from services.ai.training import train_from_records
+from services.ai.online_data import (
+    OnlineDataError,
+    SOURCE_CATALOG,
+    configured_datagov_resources,
+    refresh_online_data,
+)
+from services.ai.external_context import district_context
 from services.api.app.cctv import get_institution_feeds, capture_cctv_snapshot
 from services.api.app.vc import pick_random_candidate, initiate_vc_call, finish_vc_call
 from services.api.app.assignment import allocate_inspections, haversine_distance_km
@@ -572,6 +579,61 @@ def monitor_ai_drift(
         )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+# --------------------------------------------------------------------------
+# External Public Data API
+# --------------------------------------------------------------------------
+
+@app.get("/api/ai/data/sources")
+def list_online_data_sources(
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    return {
+        "sources": [
+            {
+                "key": key,
+                "source": spec["source"],
+                "dataset": spec["dataset"],
+                "mode": spec["mode"],
+                "endpoint": spec["endpoint"],
+                "description": spec["description"],
+            }
+            for key, spec in SOURCE_CATALOG.items()
+        ],
+        "configured_datagov_resources": [
+            {"resource_id": resource_id, "name": name}
+            for resource_id, name in configured_datagov_resources()
+        ],
+    }
+
+
+@app.post("/api/ai/data/refresh")
+def refresh_online_data_endpoint(
+    current_user: UserDB = Depends(require_role(["ministry"])),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_online_data(db, realtime=True, training_context=True)
+    except OnlineDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/ai/data/context/{district}")
+def get_online_context_endpoint(
+    district: str,
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+    db: Session = Depends(get_db),
+):
+    normalized = district.strip().upper()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="district is required")
+
+    return {
+        "district": normalized,
+        "context": district_context(db, normalized),
+    }
 
 
 # Inspections

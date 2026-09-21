@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from services.api.app.models import ExternalDataObservationDB
 
 DATAGOV_BASE_URL = "https://api.data.gov.in/resource"
-IMD_BASE_URL = "https://api.imd.gov.in/api/v1"
+IMD_BASE_URL = "https://mausam.imd.gov.in/api"
 HTTP_TIMEOUT = float(os.getenv("ONLINE_DATA_HTTP_TIMEOUT", "20"))
 
 
@@ -30,7 +30,7 @@ SOURCE_CATALOG = {
         "source": "IMD",
         "dataset": "Current Weather",
         "mode": "realtime",
-        "endpoint": f"{IMD_BASE_URL}/current_wx",
+        "endpoint": f"{IMD_BASE_URL}/current_wx_api.php",
         "auth_env": "IMD_API_TOKEN",
         "description": "Current weather observations.",
     },
@@ -38,7 +38,7 @@ SOURCE_CATALOG = {
         "source": "IMD",
         "dataset": "District Rainfall",
         "mode": "realtime",
-        "endpoint": f"{IMD_BASE_URL}/districtrainfall",
+        "endpoint": f"{IMD_BASE_URL}/districtwise_rainfall_api.php",
         "auth_env": "IMD_API_TOKEN",
         "description": "District-wise rainfall observations.",
     },
@@ -46,7 +46,7 @@ SOURCE_CATALOG = {
         "source": "IMD",
         "dataset": "District Warning",
         "mode": "realtime",
-        "endpoint": f"{IMD_BASE_URL}/districtwarning",
+        "endpoint": f"{IMD_BASE_URL}/warnings_district_api.php",
         "auth_env": "IMD_API_TOKEN",
         "description": "District-wise weather warning codes.",
     },
@@ -54,7 +54,7 @@ SOURCE_CATALOG = {
         "source": "IMD",
         "dataset": "State District Rainfall Forecast",
         "mode": "realtime",
-        "endpoint": f"{IMD_BASE_URL}/state_district_rainfall_forecast",
+        "endpoint": f"{IMD_BASE_URL}/state_district_rainfall_forecast_api.php",
         "auth_env": "IMD_API_TOKEN",
         "description": "Five-day district rainfall forecast.",
     },
@@ -268,14 +268,9 @@ def fetch_imd_source(
         raise OnlineDataError(f"Unknown IMD source: {source_key}")
 
     token = os.getenv("IMD_API_TOKEN")
-    if not token:
-        return {
-            "status": "AUTH_REQUIRED",
-            "source": "IMD",
-            "source_key": source_key,
-            "records": 0,
-        }
-
+    # IMD API access may require public-IP whitelisting. When a token is not
+    # configured, still attempt the documented endpoint for deployments where
+    # the network is already permitted.
     payload = _request_json(
         spec["endpoint"],
         source="IMD",
