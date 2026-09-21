@@ -92,6 +92,7 @@ def record_snapshot(
     *,
     source: str = "SYSTEM",
     cctv_headcount: int | None = None,
+    outcome_label: int | None = None,
 ) -> InstitutionMetricDB:
     row = InstitutionMetricDB(
         institution_id=institution.id,
@@ -102,6 +103,7 @@ def record_snapshot(
         report_variance=float(institution.report_variance),
         sanctioned_capacity=int(institution.sanctioned_capacity or 0),
         cctv_headcount=cctv_headcount,
+        outcome_label=outcome_label,
         source=source,
     )
     db.add(row)
