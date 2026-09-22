@@ -28,13 +28,35 @@ from services.api.app.auth import (
 from services.api.app.seed import seed_database
 from services.ai.anomaly import analyze_institution
 from services.ai.history import build_peer_reference, record_snapshot
+from services.ai.vision import VisionCaptureError, VisionDependencyError, analyze_stream_once
+from services.ai.documents import (
+    DocumentAnalysisError,
+    DocumentClassifier,
+    DocumentDependencyError,
+    compare_documents,
+    extract_fields,
+    ocr_image,
+)
+from services.ai.mlops import drift_report, latest_model_status
+from services.ai.training import train_from_records
+from services.ai.online_data import (
+    OnlineDataError,
+    SOURCE_CATALOG,
+    configured_datagov_resources,
+    refresh_online_data,
+)
+from services.ai.external_context import district_context
 from services.api.app.cctv import get_institution_feeds, capture_cctv_snapshot
 from services.api.app.vc import pick_random_candidate, initiate_vc_call, finish_vc_call
 from services.api.app.assignment import allocate_inspections, haversine_distance_km
 
 # Ensure uploads directory exists
 UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
+MODEL_ARTIFACT_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "artifacts", "models")
+)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(MODEL_ARTIFACT_DIR, exist_ok=True)
 
 # Seed database on startup
 seed_database()
@@ -130,6 +152,15 @@ class AIHistoryRecordRequest(BaseModel):
     institution_id: str
     source: str = "API"
     cctv_headcount: Optional[int] = None
+    outcome_label: Optional[int] = None
+
+class AITrainingRequest(BaseModel):
+    model_type: str = "isolation_forest"
+
+class AIDriftRequest(BaseModel):
+    baseline: List[Dict[str, Any]]
+    current: List[Dict[str, Any]]
+    threshold: float = 0.20
 
 # --------------------------------------------------------------------------
 # Helper Functions
@@ -429,12 +460,21 @@ def record_ai_history(
 
     if req.cctv_headcount is not None and req.cctv_headcount < 0:
         raise HTTPException(status_code=400, detail="cctv_headcount cannot be negative")
+    if req.outcome_label is not None:
+        if current_user.role not in {"ministry", "inspector"}:
+            raise HTTPException(
+                status_code=403,
+                detail="Only ministry or inspector users can submit confirmed outcome labels",
+            )
+        if req.outcome_label not in {0, 1}:
+            raise HTTPException(status_code=400, detail="outcome_label must be 0 or 1")
 
     row = record_snapshot(
         db,
         inst,
         source=req.source.strip().upper()[:32] or "API",
         cctv_headcount=req.cctv_headcount,
+        outcome_label=req.outcome_label,
     )
     analysis = get_institution_with_risk(inst, db)
 
@@ -470,11 +510,131 @@ def get_ai_history(
             "report_variance": row.report_variance,
             "sanctioned_capacity": row.sanctioned_capacity,
             "cctv_headcount": row.cctv_headcount,
+            "outcome_label": row.outcome_label,
             "source": row.source,
             "recorded_at": row.recorded_at.isoformat() if row.recorded_at else None,
         }
         for row in rows
     ]
+
+
+@app.get("/api/ai/model/status")
+def get_ai_model_status(
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    return latest_model_status(MODEL_ARTIFACT_DIR)
+
+
+@app.post("/api/ai/train")
+def train_ai_model(
+    req: AITrainingRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry"])),
+):
+    rows = db.query(InstitutionMetricDB).order_by(
+        InstitutionMetricDB.recorded_at.asc()
+    ).all()
+
+    records = [
+        {
+            "attendance": row.attendance,
+            "beneficiaries": row.beneficiaries,
+            "inspections": row.inspections,
+            "report_variance": row.report_variance,
+            "sanctioned_capacity": row.sanctioned_capacity,
+            "outcome_label": row.outcome_label,
+        }
+        for row in rows
+    ]
+
+    try:
+        result = train_from_records(
+            records,
+            MODEL_ARTIFACT_DIR,
+            req.model_type,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "status": "TRAINED",
+        "model": req.model_type,
+        "artifact": result,
+    }
+
+
+@app.post("/api/ai/monitor/drift")
+def monitor_ai_drift(
+    req: AIDriftRequest,
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    try:
+        from services.ai.features import FEATURE_NAMES, extract_features
+        return drift_report(
+            req.baseline,
+            req.current,
+            FEATURE_NAMES,
+            extract_features,
+            threshold=req.threshold,
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+# --------------------------------------------------------------------------
+# External Public Data API
+# --------------------------------------------------------------------------
+
+@app.get("/api/ai/data/sources")
+def list_online_data_sources(
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    return {
+        "sources": [
+            {
+                "key": key,
+                "source": spec["source"],
+                "dataset": spec["dataset"],
+                "mode": spec["mode"],
+                "endpoint": spec["endpoint"],
+                "description": spec["description"],
+            }
+            for key, spec in SOURCE_CATALOG.items()
+        ],
+        "configured_datagov_resources": [
+            {"resource_id": resource_id, "name": name}
+            for resource_id, name in configured_datagov_resources()
+        ],
+    }
+
+
+@app.post("/api/ai/data/refresh")
+def refresh_online_data_endpoint(
+    current_user: UserDB = Depends(require_role(["ministry"])),
+    db: Session = Depends(get_db),
+):
+    try:
+        return refresh_online_data(db, realtime=True, training_context=True)
+    except OnlineDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/ai/data/context/{district}")
+def get_online_context_endpoint(
+    district: str,
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+    db: Session = Depends(get_db),
+):
+    normalized = district.strip().upper()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="district is required")
+
+    return {
+        "district": normalized,
+        "context": district_context(db, normalized),
+    }
+
 
 # Inspections
 @app.get("/api/inspections")
@@ -918,6 +1078,10 @@ class CCTVSnapshotReq(BaseModel):
     feed_id: str
     inspection_id: Optional[str] = None
 
+class CCTVAnalyzeRequest(BaseModel):
+    confidence: float = 0.35
+    tracking: bool = True
+
 @app.post("/api/cctv/snapshot")
 def capture_snapshot_endpoint(
     req: CCTVSnapshotReq,
@@ -933,6 +1097,59 @@ def capture_snapshot_endpoint(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/cctv/{feed_id}/analyze")
+def analyze_cctv_feed(
+    feed_id: str,
+    req: CCTVAnalyzeRequest,
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+    db: Session = Depends(get_db),
+):
+    feed = db.query(CCTVFeedDB).filter(CCTVFeedDB.id == feed_id).first()
+    if not feed:
+        raise HTTPException(status_code=404, detail="CCTV Feed not found")
+
+    try:
+        result = analyze_stream_once(
+            feed.stream_url,
+            confidence=req.confidence,
+            tracking=req.tracking,
+        )
+    except (VisionDependencyError, VisionCaptureError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    feed.ai_crowd_count = int(result["person_count"])
+    feed.motion_detected = bool(result["person_count"] > 0)
+    feed.last_ping = datetime.now(timezone.utc)
+    db.commit()
+
+    inst = db.query(InstitutionDB).filter(InstitutionDB.id == feed.institution_id).first()
+    risk = None
+    if inst:
+        record_snapshot(
+            db,
+            inst,
+            source="CCTV_AI",
+            cctv_headcount=int(result["person_count"]),
+        )
+        risk = get_institution_with_risk(inst, db)
+
+    return {
+        "feed_id": feed.id,
+        "institution_id": feed.institution_id,
+        "camera_name": feed.camera_name,
+        "person_count": result["person_count"],
+        "tracking_enabled": result["tracking_enabled"],
+        "detections": result["detections"],
+        "capture": result["capture"],
+        "risk": {
+            "risk_score": risk["risk_score"] if risk else None,
+            "risk_band": risk["risk_band"] if risk else None,
+            "model_status": risk["model_status"] if risk else None,
+            "reference_population_size": risk["reference_population_size"] if risk else None,
+        },
+    }
 
 # --------------------------------------------------------------------------
 # Surprise Video Conferencing (VC) API
@@ -1129,8 +1346,13 @@ def submit_biometric_punch(
         raise HTTPException(status_code=404, detail="Institution not found")
 
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cctv_est = req.cctv_estimated_headcount or int(req.beneficiaries_present * 0.85)
-    variance_flag = abs(req.beneficiaries_present - cctv_est) > (req.beneficiaries_total * 0.20)
+    cctv_est = req.cctv_estimated_headcount
+    if cctv_est is None:
+        cctv_est = int(req.beneficiaries_present * 0.85)
+
+    variance_flag = abs(req.beneficiaries_present - cctv_est) > (
+        req.beneficiaries_total * 0.20
+    )
 
     punch = BiometricPunchDB(
         id=f"PUNCH-{uuid.uuid4().hex[:8]}",
@@ -1147,45 +1369,24 @@ def submit_biometric_punch(
     )
     db.add(punch)
 
-    # Update institution attendance percentage
     if req.beneficiaries_total > 0:
-        inst.attendance = round((req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1)
+        inst.attendance = round(
+            (req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1
+        )
         inst.beneficiaries = req.beneficiaries_total
 
-@app.post("/api/biometric/punch")
-def submit_biometric_punch(
-    req: BiometricPunchCreate,
-    current_user: UserDB = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    inst = db.query(InstitutionDB).filter(InstitutionDB.id == req.institution_id).first()
-    if not inst:
-        raise HTTPException(status_code=404, detail="Institution not found")
+    db.commit()
+    db.refresh(punch)
 
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cctv_est = req.cctv_estimated_headcount or int(req.beneficiaries_present * 0.85)
-    variance_flag = abs(req.beneficiaries_present - cctv_est) > (req.beneficiaries_total * 0.20)
-
-    punch = BiometricPunchDB(
-        id=f"PUNCH-{uuid.uuid4().hex[:8]}",
-        institution_id=req.institution_id,
-        date=today_str,
-        shift=req.shift,
-        staff_present=req.staff_present,
-        staff_total=req.staff_total,
-        beneficiaries_present=req.beneficiaries_present,
-        beneficiaries_total=req.beneficiaries_total,
-        cctv_estimated_headcount=cctv_est,
-        variance_flag=variance_flag,
-        uploaded_at=datetime.now(timezone.utc)
+    record_snapshot(
+        db,
+        inst,
+        source="BIOMETRIC",
+        cctv_headcount=cctv_est,
     )
-    db.add(punch)
 
-    # Update institution attendance percentage
-    if req.beneficiaries_total > 0:
-        inst.attendance = round((req.beneficiaries_present / req.beneficiaries_total) * 100.0, 1)
-        inst.beneficiaries = req.beneficiaries_total
-
+    return {
+        "status": "SUBMITTED",
         "punch_id": punch.id,
         "date": today_str,
         "shift": req.shift,
@@ -1193,6 +1394,7 @@ def submit_biometric_punch(
         "variance_flag": variance_flag,
         "message": "Daily biometric attendance synchronized with DoSJE Central Server."
     }
+
 
 @app.get("/api/biometric/history")
 def get_biometric_history(
@@ -1202,6 +1404,56 @@ def get_biometric_history(
     return db.query(BiometricPunchDB).filter(
         BiometricPunchDB.institution_id == institution_id
     ).order_by(BiometricPunchDB.uploaded_at.desc()).limit(15).all()
+
+
+# --------------------------------------------------------------------------
+# Document Intelligence API
+# --------------------------------------------------------------------------
+
+@app.post("/api/documents/analyze")
+async def analyze_document_endpoint(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Document file is empty")
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Document exceeds 10 MB limit")
+
+    try:
+        ocr = ocr_image(content)
+    except (DocumentDependencyError, DocumentAnalysisError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    fields = extract_fields(ocr.text)
+    classifier = DocumentClassifier()
+    classification = classifier.predict(ocr.text)
+
+    return {
+        "filename": file.filename,
+        "mime_type": file.content_type,
+        "ocr": {
+            "provider": ocr.provider,
+            "confidence": ocr.confidence,
+            "text": ocr.text,
+        },
+        "extracted_fields": fields,
+        "classification": classification,
+        "status": "ANALYZED",
+    }
+
+
+@app.post("/api/documents/compare")
+def compare_document_endpoint(
+    documents: List[Dict[str, Any]],
+    current_user: UserDB = Depends(require_role(["ministry", "inspector"])),
+):
+    if not documents:
+        raise HTTPException(status_code=400, detail="At least one document record is required")
+    return compare_documents(documents)
+
 
 # --------------------------------------------------------------------------
 # Structured Inspection Audit Certificate Report API
